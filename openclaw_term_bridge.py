@@ -3,6 +3,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -30,19 +31,10 @@ OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "seu_token_fallback")
 # Captura qualquer padrão de escape ANSI (byte ESC real ou notação literal)
 ANSI_CAPTURE = re.compile(r'(\\033|\\x1b|\\e|\x1b)\[[0-9;]*[a-zA-Z]')
 
-def generate_session_id() -> str:
-    """Gera um ID de sessão curto e único para isolamento determinístico de contexto."""
-    return f"term-{uuid.uuid4().hex[:8]}"
-
 def sanitize_text(text: str) -> str:
-    """
-    Remove símbolos APENAS se o caractere NÃO for representável na CP850.
-    A CP850 suporta nativamente a acentuação completa em Português (ã, õ, ç, á, é, ê, etc.).
-    """
     unsupported_map = {
         '“': '"', '”': '"', '‘': "'", '’': "'", '—': '-', '–': '-', '…': '...', '•': '*',
     }
-    
     res = []
     for char in text:
         if char in unsupported_map:
@@ -53,14 +45,60 @@ def sanitize_text(text: str) -> str:
                 res.append(char)
             except UnicodeEncodeError:
                 res.append("?")
-                
     return "".join(res)
 
 def encode_dos(text: str) -> bytes:
-    """Converte texto preservando a acentuação compatível com CP850."""
     return text.encode("cp850", errors="ignore")
 
-def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str) -> dict:
+class BBSSpinner:
+    """Spinner clássico de BBS com envio em tempo real via TCP sem buffer."""
+    FRAMES = ["|", "/", "-", "\\"]
+
+    def __init__(self, conn: socket.socket, message: str = "Aguardando"):
+        self.conn = conn
+        self.message = message
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._spin, daemon=True)
+
+    def start(self):
+        # Renderiza o 1º frame imediatamente na tela antes de iniciar o timer da thread
+        first_frame = f"\r{CLR_STATUS}[{self.message} {self.FRAMES[0]}]{CLR_RESET}"
+        try:
+            self.conn.sendall(encode_dos(first_frame))
+        except Exception:
+            pass
+        self.thread.start()
+
+    def stop(self):
+        if not self.stop_event.is_set():
+            self.stop_event.set()
+            if self.thread.is_alive():
+                self.thread.join(timeout=0.5)
+            # Sobrescreve com espaços e volta o cursor para a margem esquerda
+            clear_len = len(self.message) + 8
+            try:
+                self.conn.sendall(encode_dos("\r" + (" " * clear_len) + "\r"))
+            except Exception:
+                pass
+
+    def _spin(self):
+        idx = 1
+        while not self.stop_event.is_set():
+            self.stop_event.wait(0.12)
+            if self.stop_event.is_set():
+                break
+            frame = self.FRAMES[idx % len(self.FRAMES)]
+            text = f"\r{CLR_STATUS}[{self.message} {frame}]{CLR_RESET}"
+            try:
+                self.conn.sendall(encode_dos(text))
+            except Exception:
+                break
+            idx += 1
+
+def generate_session_id() -> str:
+    return f"term-{uuid.uuid4().hex[:8]}"
+
+def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str, spinner: BBSSpinner) -> dict:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENCLAW_TOKEN}"
@@ -86,6 +124,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
     }
     
     usage = {}
+    spinner_active = True
 
     try:
         response = requests.post(
@@ -95,13 +134,13 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
             stream=True, 
             timeout=300
         )
-        
+
         if response.status_code != 200:
-            err_msg = f"\r\n{CLR_ERROR}[Erro OpenClaw: {response.status_code}]{CLR_RESET}\r\n"
+            spinner.stop()
+            spinner_active = False
+            err_msg = f"{CLR_ERROR}[Erro OpenClaw: {response.status_code}]{CLR_RESET}\r\n"
             conn.sendall(encode_dos(err_msg))
             return usage
-
-        conn.sendall(encode_dos(f"\r\n{CLR_AGENT}"))
 
         col_count = 0
         MAX_COLS = 76
@@ -120,7 +159,6 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                 try:
                     chunk_json = json.loads(data_str)
 
-                    # Captura informações de tokens quando enviadas no stream
                     if chunk_json.get("usage"):
                         usage = chunk_json["usage"]
 
@@ -130,6 +168,12 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                         content = delta.get("content", "")
                         
                         if content:
+                            # Apaga o spinner APENAS no exato instante em que o primeiro caractere for renderizado
+                            if spinner_active:
+                                spinner.stop()
+                                spinner_active = False
+                                conn.sendall(encode_dos(CLR_AGENT))
+
                             raw_accumulator += sanitize_text(content)
                             
                             while True:
@@ -185,6 +229,9 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                 except json.JSONDecodeError:
                     continue
 
+        if spinner_active:
+            spinner.stop()
+
         if raw_accumulator:
             final_clean = re.sub(r'(\\033|\\x1b|\\e)', '\x1b', raw_accumulator)
             for char in final_clean:
@@ -196,33 +243,39 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
         conn.sendall(encode_dos(f"{CLR_RESET}\r\n"))
 
     except Exception as e:
-        err_msg = f"\r\n{CLR_ERROR}[Erro no stream: {str(e)}]{CLR_RESET}\r\n"
+        if spinner_active:
+            spinner.stop()
+        err_msg = f"{CLR_ERROR}[Erro no stream: {str(e)}]{CLR_RESET}\r\n"
         conn.sendall(encode_dos(err_msg))
 
     return usage
 
-def start_bridge(port: int, agent: str):
+def start_bridge(port: int, agent: str, fixed_session_id: str = None):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, port))
     server.listen(5)
     print(f"[*] Bridge OpenClaw escutando na porta {port} | Agente: {agent}")
+    if fixed_session_id:
+        print(f"[*] Sessão padrão configurada: {fixed_session_id}")
 
     while True:
         conn = None
         addr = None
         try:
             conn, addr = server.accept()
+            # Desativa o buffer Nagle para envio imediato de bytes de controle e do spinner
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             print(f"[+] Nova conexão estabelecida via {addr}")
            
-            session_id = generate_session_id()
+            session_id = fixed_session_id or generate_session_id()
             session_tokens = 0
 
             banner = (
                 f"\r\n{CLR_HEADER}========================================\r\n"
                 f"    OPENCLAW LOCAL AGENT - TERMINAL     \r\n"
                 f"========================================{CLR_RESET}\r\n"
-                f"{CLR_STATUS}[Sessão: {session_id} | Comandos: /new, /reset]{CLR_RESET}\r\n\r\n"
+                f"{CLR_STATUS}[Sessão: {session_id} | Comandos: /new [id], /reset, /session <id>]{CLR_RESET}\r\n\r\n"
                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
             )
             conn.sendall(encode_dos(banner))
@@ -243,21 +296,28 @@ def start_bridge(port: int, agent: str):
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                             continue
 
-                        # Intercepta os comandos de reset determinístico
-                        if prompt.lower() in ("/reset", "/new"):
-                            session_id = generate_session_id()
+                        parts = prompt.split(maxsplit=1)
+                        cmd = parts[0].lower()
+
+                        if cmd in ("/reset", "/new", "/session"):
+                            if len(parts) > 1:
+                                session_id = parts[1].strip()
+                            else:
+                                session_id = fixed_session_id or generate_session_id()
+
                             session_tokens = 0
                             reset_msg = (
-                                f"\r\n{CLR_STATUS}[Nova sessão iniciada: {session_id}]{CLR_RESET}\r\n"
+                                f"\r\n{CLR_STATUS}[Sessão ativa: {session_id}]{CLR_RESET}\r\n"
                                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
                             )
                             conn.sendall(encode_dos(reset_msg))
                             continue
 
-                        status_msg = f"\r\n{CLR_STATUS}[Aguardando...]{CLR_RESET}"
-                        conn.sendall(encode_dos(status_msg))
+                        conn.sendall(encode_dos("\r\n"))
+                        spinner = BBSSpinner(conn, message="Aguarde")
+                        spinner.start()
                         
-                        usage = stream_openclaw(prompt, conn, agent, session_id)
+                        usage = stream_openclaw(prompt, conn, agent, session_id, spinner)
                         
                         p_tok = usage.get("prompt_tokens", 0)
                         c_tok = usage.get("completion_tokens", 0)
@@ -268,8 +328,8 @@ def start_bridge(port: int, agent: str):
                             f"\r\n{CLR_RESET}[P:{p_tok} R:{c_tok} | T:{session_tokens}]{CLR_RESET}\r\n"
                         )
                         conn.sendall(encode_dos(tok_info))
-                        
                         conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+
                     elif char == "\x08":
                         if len(buffer) > 0:
                             buffer = buffer[:-1]
@@ -295,26 +355,19 @@ def start_bridge(port: int, agent: str):
 if __name__ == "__main__":
     env_port = int(os.getenv("PORT", DEFAULT_PORT))
     env_agent = os.getenv("AGENT", DEFAULT_AGENT)
+    env_session = os.getenv("SESSION_ID", None)
 
     parser = argparse.ArgumentParser(description="Bridge OpenClaw para TeleMate Terminal (CP850)")
-    parser.add_argument(
-        "-p", "--port",
-        type=int,
-        default=env_port,
-        help=f"Porta do servidor socket (padrão: {env_port})"
-    )
-    parser.add_argument(
-        "-a", "--agent",
-        type=str,
-        default=env_agent,
-        help=f"Modelo do agente OpenClaw (padrão: {env_agent})"
-    )
+    parser.add_argument("-p", "--port", type=int, default=env_port, help=f"Porta do servidor socket (padrão: {env_port})")
+    parser.add_argument("-a", "--agent", type=str, default=env_agent, help=f"Modelo do agente OpenClaw (padrão: {env_agent})")
+    parser.add_argument("-s", "--session", type=str, default=env_session, help="ID de sessão fixo para retomar conversas anteriores")
 
     args = parser.parse_args()
 
     try:
-        start_bridge(port=args.port, agent=args.agent)
+        start_bridge(port=args.port, agent=args.agent, fixed_session_id=args.session)
     except KeyboardInterrupt:
         print("\n[*] Bridge encerrada.")
     except Exception as e:
         print(f"\n[!] Erro fatal: {e}")
+
