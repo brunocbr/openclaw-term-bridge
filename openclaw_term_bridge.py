@@ -4,6 +4,7 @@ import os
 import re
 import socket
 import time
+import uuid
 from pathlib import Path
 import requests
 from dotenv import load_dotenv
@@ -28,6 +29,10 @@ OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "seu_token_fallback")
 
 # Captura qualquer padrão de escape ANSI (byte ESC real ou notação literal)
 ANSI_CAPTURE = re.compile(r'(\\033|\\x1b|\\e|\x1b)\[[0-9;]*[a-zA-Z]')
+
+def generate_session_id() -> str:
+    """Gera um ID de sessão curto e único para isolamento determinístico de contexto."""
+    return f"term-{uuid.uuid4().hex[:8]}"
 
 def sanitize_text(text: str) -> str:
     """
@@ -55,14 +60,14 @@ def encode_dos(text: str) -> bytes:
     """Converte texto preservando a acentuação compatível com CP850."""
     return text.encode("cp850", errors="ignore")
 
-def stream_openclaw(prompt: str, conn: socket.socket, agent: str) -> dict:
+def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str) -> dict:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENCLAW_TOKEN}"
     }
     payload = {
         "model": agent,
-        "user": "terminal-bridge",
+        "user": session_id,
         "messages": [
             {
                 "role": "system",
@@ -88,7 +93,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str) -> dict:
             headers=headers, 
             json=payload, 
             stream=True, 
-            timeout=30
+            timeout=300
         )
         
         if response.status_code != 200:
@@ -210,12 +215,14 @@ def start_bridge(port: int, agent: str):
             conn, addr = server.accept()
             print(f"[+] Nova conexão estabelecida via {addr}")
            
+            session_id = generate_session_id()
             session_tokens = 0
 
             banner = (
                 f"\r\n{CLR_HEADER}========================================\r\n"
                 f"    OPENCLAW LOCAL AGENT - TERMINAL     \r\n"
-                f"========================================{CLR_RESET}\r\n\r\n"
+                f"========================================{CLR_RESET}\r\n"
+                f"{CLR_STATUS}[Sessão: {session_id} | Comandos: /new, /reset]{CLR_RESET}\r\n\r\n"
                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
             )
             conn.sendall(encode_dos(banner))
@@ -232,23 +239,37 @@ def start_bridge(port: int, agent: str):
                     if char in ("\r", "\n"):
                         prompt = buffer.strip()
                         buffer = ""
-                        if prompt:
-                            status_msg = f"\r\n{CLR_STATUS}[Aguardando OpenClaw...]{CLR_RESET}"
-                            conn.sendall(encode_dos(status_msg))
-                            
-                            usage = stream_openclaw(prompt, conn, agent)
-                            
-                            p_tok = usage.get("prompt_tokens", 0)
-                            c_tok = usage.get("completion_tokens", 0)
-                            req_tok = usage.get("total_tokens", 0)
-                            session_tokens += req_tok
+                        if not prompt:
+                            conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                            continue
 
-                            tok_info = (
-                                f"{CLR_RESET}[P:{p_tok} R:{c_tok}]{CLR_RESET}\n\r"
+                        # Intercepta os comandos de reset determinístico
+                        if prompt.lower() in ("/reset", "/new"):
+                            session_id = generate_session_id()
+                            session_tokens = 0
+                            reset_msg = (
+                                f"\r\n{CLR_STATUS}[Nova sessão iniciada: {session_id}]{CLR_RESET}\r\n"
+                                f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
                             )
-                            conn.sendall(encode_dos(tok_info))
-                            
-                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                            conn.sendall(encode_dos(reset_msg))
+                            continue
+
+                        status_msg = f"\r\n{CLR_STATUS}[Aguardando...]{CLR_RESET}"
+                        conn.sendall(encode_dos(status_msg))
+                        
+                        usage = stream_openclaw(prompt, conn, agent, session_id)
+                        
+                        p_tok = usage.get("prompt_tokens", 0)
+                        c_tok = usage.get("completion_tokens", 0)
+                        req_tok = usage.get("total_tokens", 0)
+                        session_tokens += req_tok
+
+                        tok_info = (
+                            f"\r\n{CLR_RESET}[P:{p_tok} R:{c_tok} | T:{session_tokens}]{CLR_RESET}\r\n"
+                        )
+                        conn.sendall(encode_dos(tok_info))
+                        
+                        conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                     elif char == "\x08":
                         if len(buffer) > 0:
                             buffer = buffer[:-1]
