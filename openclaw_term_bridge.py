@@ -55,7 +55,7 @@ def encode_dos(text: str) -> bytes:
     """Converte texto preservando a acentuação compatível com CP850."""
     return text.encode("cp850", errors="ignore")
 
-def stream_openclaw(prompt: str, conn: socket.socket, agent: str):
+def stream_openclaw(prompt: str, conn: socket.socket, agent: str) -> dict:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENCLAW_TOKEN}"
@@ -76,9 +76,12 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str):
             },
             {"role": "user", "content": prompt}
         ],
-        "stream": True
+        "stream": True,
+        "stream_options": {"include_usage": True}
     }
     
+    usage = {}
+
     try:
         response = requests.post(
             OPENCLAW_URL, 
@@ -91,7 +94,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str):
         if response.status_code != 200:
             err_msg = f"\r\n{CLR_ERROR}[Erro OpenClaw: {response.status_code}]{CLR_RESET}\r\n"
             conn.sendall(encode_dos(err_msg))
-            return
+            return usage
 
         conn.sendall(encode_dos(f"\r\n{CLR_AGENT}"))
 
@@ -111,61 +114,68 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str):
                 
                 try:
                     chunk_json = json.loads(data_str)
-                    delta = chunk_json["choices"][0].get("delta", {})
-                    content = delta.get("content", "")
-                    
-                    if content:
-                        raw_accumulator += sanitize_text(content)
+
+                    # Captura informações de tokens quando enviadas no stream
+                    if chunk_json.get("usage"):
+                        usage = chunk_json["usage"]
+
+                    choices = chunk_json.get("choices", [])
+                    if choices:
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content", "")
                         
-                        while True:
-                            match = ANSI_CAPTURE.search(raw_accumulator)
-                            if not match:
-                                break
+                        if content:
+                            raw_accumulator += sanitize_text(content)
                             
-                            start, end = match.span()
-                            
-                            text_before = raw_accumulator[:start]
-                            for char in text_before:
-                                if char == "\n":
-                                    conn.sendall(encode_dos("\r\n"))
-                                    col_count = 0
-                                else:
-                                    if col_count >= MAX_COLS and char == " ":
+                            while True:
+                                match = ANSI_CAPTURE.search(raw_accumulator)
+                                if not match:
+                                    break
+                                
+                                start, end = match.span()
+                                
+                                text_before = raw_accumulator[:start]
+                                for char in text_before:
+                                    if char == "\n":
                                         conn.sendall(encode_dos("\r\n"))
                                         col_count = 0
                                     else:
-                                        conn.sendall(encode_dos(char))
-                                        col_count += 1
-                                        
-                            raw_seq = match.group(0)
-                            clean_ansi = re.sub(r'^(\\033|\\x1b|\\e|\x1b)', '\x1b', raw_seq)
-                            conn.sendall(encode_dos(clean_ansi))
-                            
-                            raw_accumulator = raw_accumulator[end:]
+                                        if col_count >= MAX_COLS and char == " ":
+                                            conn.sendall(encode_dos("\r\n"))
+                                            col_count = 0
+                                        else:
+                                            conn.sendall(encode_dos(char))
+                                            col_count += 1
+                                            
+                                raw_seq = match.group(0)
+                                clean_ansi = re.sub(r'^(\\033|\\x1b|\\e|\x1b)', '\x1b', raw_seq)
+                                conn.sendall(encode_dos(clean_ansi))
+                                
+                                raw_accumulator = raw_accumulator[end:]
 
-                        if raw_accumulator:
-                            last_esc_pos = max(
-                                raw_accumulator.rfind("\\"), 
-                                raw_accumulator.rfind("\x1b")
-                            )
-                            if last_esc_pos == -1:
-                                safe_text = raw_accumulator
-                                raw_accumulator = ""
-                            else:
-                                safe_text = raw_accumulator[:last_esc_pos]
-                                raw_accumulator = raw_accumulator[last_esc_pos:]
-
-                            for char in safe_text:
-                                if char == "\n":
-                                    conn.sendall(encode_dos("\r\n"))
-                                    col_count = 0
+                            if raw_accumulator:
+                                last_esc_pos = max(
+                                    raw_accumulator.rfind("\\"), 
+                                    raw_accumulator.rfind("\x1b")
+                                )
+                                if last_esc_pos == -1:
+                                    safe_text = raw_accumulator
+                                    raw_accumulator = ""
                                 else:
-                                    if col_count >= MAX_COLS and char == " ":
+                                    safe_text = raw_accumulator[:last_esc_pos]
+                                    raw_accumulator = raw_accumulator[last_esc_pos:]
+
+                                for char in safe_text:
+                                    if char == "\n":
                                         conn.sendall(encode_dos("\r\n"))
                                         col_count = 0
                                     else:
-                                        conn.sendall(encode_dos(char))
-                                        col_count += 1
+                                        if col_count >= MAX_COLS and char == " ":
+                                            conn.sendall(encode_dos("\r\n"))
+                                            col_count = 0
+                                        else:
+                                            conn.sendall(encode_dos(char))
+                                            col_count += 1
 
                 except json.JSONDecodeError:
                     continue
@@ -184,6 +194,8 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str):
         err_msg = f"\r\n{CLR_ERROR}[Erro no stream: {str(e)}]{CLR_RESET}\r\n"
         conn.sendall(encode_dos(err_msg))
 
+    return usage
+
 def start_bridge(port: int, agent: str):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -198,6 +210,8 @@ def start_bridge(port: int, agent: str):
             conn, addr = server.accept()
             print(f"[+] Nova conexão estabelecida via {addr}")
            
+            session_tokens = 0
+
             banner = (
                 f"\r\n{CLR_HEADER}========================================\r\n"
                 f"    OPENCLAW LOCAL AGENT - TERMINAL     \r\n"
@@ -222,9 +236,19 @@ def start_bridge(port: int, agent: str):
                             status_msg = f"\r\n{CLR_STATUS}[Aguardando OpenClaw...]{CLR_RESET}"
                             conn.sendall(encode_dos(status_msg))
                             
-                            stream_openclaw(prompt, conn, agent)
+                            usage = stream_openclaw(prompt, conn, agent)
                             
-                            conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                            p_tok = usage.get("prompt_tokens", 0)
+                            c_tok = usage.get("completion_tokens", 0)
+                            req_tok = usage.get("total_tokens", 0)
+                            session_tokens += req_tok
+
+                            tok_info = (
+                                f"{CLR_RESET}[P:{p_tok} R:{c_tok}]{CLR_RESET}\n\r"
+                            )
+                            conn.sendall(encode_dos(tok_info))
+                            
+                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                     elif char == "\x08":
                         if len(buffer) > 0:
                             buffer = buffer[:-1]
