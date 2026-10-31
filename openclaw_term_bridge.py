@@ -62,13 +62,18 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str):
     }
     payload = {
         "model": agent,
-        "user": "brunoc",
+        "user": "terminal-bridge",
         "messages": [
-            {"role": "system", "content": (
-                "Ambiente: Terminal DOS TeleMate, 78 colunas max. "
-                "Para formatar cores ANSI use códigos ANSI literais. "
-                "Não use Markdown (sem **, ## ou tabelas com |)."
-            )},
+            {
+                "role": "system",
+                "content": (
+                    "Ambiente: Terminal DOS TeleMate em ANSI, CP850, 78 colunas máx.\n"
+                    "Sempre use acentuação normal em português (á, é, ã, ç, etc.).\n"
+                    "Proibido Markdown (** ## |). Para cores use prefixo \\e[ (reset \\e[0m):\n"
+                    "Cores: \\e[1;36m=Ciano \\e[1;33m=Amarelo \\e[1;32m=Verde \\e[1;31m=Vermelho \\e[1;35m=Magenta\n"
+                    "Exemplo: \\e[1;35m[AGENTE]\\e[0m \\e[1;36mStatus:\\e[0m \\e[1;32mOK\\e[0m"
+                )
+            },
             {"role": "user", "content": prompt}
         ],
         "stream": True
@@ -200,8 +205,6 @@ def start_bridge(port: int, agent: str):
                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
             )
             conn.sendall(encode_dos(banner))
-
-            print("DEBUG: banner enviado")
 
             buffer = ""
             while True:
