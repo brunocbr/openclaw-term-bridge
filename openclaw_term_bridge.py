@@ -5,6 +5,7 @@ import re
 import shutil
 import socket
 import subprocess
+import unicodedata
 import tempfile
 import threading
 import time
@@ -56,6 +57,35 @@ PHASE_LABELS = {
     "starting_model": "Pensando...",
     "thinking": "Raciocinando...",
 }
+
+def to_dos_83_filename(filename: str) -> str:
+    """Converte qualquer nome de arquivo moderno para o padrão estrito MS-DOS 8.3 (FAT)."""
+    nfkd = unicodedata.normalize("NFKD", filename)
+    ascii_name = "".join(c for c in nfkd if not unicodedata.combining(c))
+    base, ext = os.path.splitext(ascii_name)
+    clean_base = re.sub(r"[^a-zA-Z0-9_\-]", "_", base)
+    clean_base = re.sub(r"_+", "_", clean_base).strip("_")
+    clean_ext = re.sub(r"[^a-zA-Z0-9]", "", ext)
+    EXT_MAP = {
+        "markdown": "md",
+        "text": "txt",
+        "html": "htm",
+        "jpeg": "jpg",
+        "yaml": "yml",
+        "python": "py",
+    }
+    ext_lower = clean_ext.lower()
+    if ext_lower in EXT_MAP:
+        clean_ext = EXT_MAP[ext_lower]
+    else:
+        clean_ext = clean_ext[:3]
+    if not clean_base:
+        clean_base = "FILE"
+    clean_base = clean_base[:8].upper()
+    clean_ext = clean_ext[:3].upper()
+    if clean_ext:
+        return f"{clean_base}.{clean_ext}"
+    return clean_base
 
 TEXT_EXTENSIONS = {
     ".txt", ".text", ".md", ".markdown", ".c", ".h", ".cpp", ".pas",
@@ -544,8 +574,9 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
         conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: Arquivo não encontrado ou inválido: {filepath}]{CLR_RESET}\r\n"))
         return
 
-    temp_dir = None
-    target_send_path = filepath
+    dos_filename = to_dos_83_filename(os.path.basename(filepath))
+    temp_dir = tempfile.mkdtemp(prefix="telemate_dl_")
+    target_send_path = os.path.join(temp_dir, dos_filename)
     is_text = is_text_file(filepath)
 
     if is_text:
@@ -553,18 +584,16 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
             with open(filepath, "rb") as f:
                 raw_bytes = f.read()
             converted_bytes = convert_utf8_to_cp850_crlf(raw_bytes)
-            
-            temp_dir = tempfile.mkdtemp(prefix="telemate_dl_")
-            temp_file = os.path.join(temp_dir, os.path.basename(filepath))
-            with open(temp_file, "wb") as f:
+            with open(target_send_path, "wb") as f:
                 f.write(converted_bytes)
-            target_send_path = temp_file
-            conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Conversão de texto ativa: UTF-8 (Unix) -> CP850 (DOS CRLF)]{CLR_RESET}"))
+            conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Conversão ativa: UTF-8 -> CP850 (CRLF) | Nome DOS: {dos_filename}]{CLR_RESET}"))
         except Exception:
-            target_send_path = filepath
+            shutil.copy2(filepath, target_send_path)
+    else:
+        shutil.copy2(filepath, target_send_path)
 
     file_size = os.path.getsize(target_send_path)
-    file_name = os.path.basename(target_send_path)
+    file_name = dos_filename
     conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Iniciando ZMODEM Download: {file_name} ({file_size} bytes)...]{CLR_RESET}\r\n"))
     time.sleep(0.3)
 
@@ -580,7 +609,7 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
     try:
         fd = conn.fileno()
         proc = subprocess.run(
-            [sz_bin, "-b", "--zmodem", target_send_path],
+            [sz_bin, "-b", "-e", "--zmodem", target_send_path],
             stdin=fd,
             stdout=fd,
             stderr=subprocess.DEVNULL
