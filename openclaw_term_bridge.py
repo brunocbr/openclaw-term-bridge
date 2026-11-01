@@ -419,10 +419,10 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
 
     # Contexto de formato para TeleMate injetado no prompt
     env_context = (
-        "[Contexto: Terminal DOS TeleMate em ANSI, CP850, 78 colunas máx.\n"
+        "[Contexto: Terminal DOS TeleMate em ANSI, CP850.\n"
         "Sempre use acentuação normal em português (á, é, ã, ç, etc.).\n"
         "Proibido emojis ou caracteres Unicode modernos: use estritamente ASCII e acentuação da CP850 do MS-DOS. Para ícones ou símbolos visuais, use apenas arte ASCII simples.\n"
-        "Proibido Markdown (** ## |). Use listas simples com hífen (-). Quebre parágrafos longos respeitando o limite de 78 colunas.\n"
+        "Proibido Markdown (** ## |). Use listas simples com hífen (-). Não insira quebras manuais de linha no meio de frases: escreva parágrafos contínuos e fluidos (o terminal faz o word-wrap automaticamente).\n"
         "Para cores use prefixo \\e[ (reset \\e[0m):\n"
         "Cores: \\e[1;36m=Ciano \\e[1;33m=Amarelo \\e[1;32m=Verde \\e[1;31m=Vermelho \\e[1;35m=Magenta\n"
         "Exemplo: \\e[1;35m[AGENTE]\\e[0m \\e[1;36mStatus:\\e[0m \\e[1;32mOK\\e[0m\n"
