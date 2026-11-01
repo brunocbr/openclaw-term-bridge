@@ -1086,6 +1086,8 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                         if len(buffer) > 0:
                             buffer = buffer[:-1]
                             conn.sendall(b"\x08 \x08")
+                    elif char == "\x0c":  # Ctrl+L (limpar tela inteira e reexibir prompt com buffer atual)
+                        conn.sendall(encode_dos(f"\x1b[2J\x1b[H{CLR_PROMPT}OpenClaw>{CLR_USER} {buffer}"))
                     elif char == "\x15":  # Ctrl+U (limpar linha e reexibir prompt)
                         history_idx = -1
                         if len(buffer) > 0:
