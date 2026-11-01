@@ -151,6 +151,90 @@ def format_tool_status(name: str, title: str = None) -> str:
     return f"{label}: {t}"
 
 
+class ANSIWordWrapper:
+    """
+    Word-wrapper avancado para streaming com ANSI.
+    Ignora sequencias de escape na largura da tela e quebra
+    linhas suavemente nos espacos antes de estourar max_cols.
+    """
+    def __init__(self, max_cols: int = 72):
+        self.max_cols = max_cols
+        self.col = 0
+        self.word_chars = []
+        self.word_vis_len = 0
+        self.in_ansi = False
+        self.ansi_buf = ""
+
+    def feed(self, text: str) -> str:
+        out = []
+        for char in text:
+            if self.in_ansi:
+                self.ansi_buf += char
+                if char.isalpha() or char in ("~", "@"):
+                    self.in_ansi = False
+                    clean_seq = re.sub(r"^(\\033|\\x1b|\\e|\x1b)", "\x1b", self.ansi_buf)
+                    self.word_chars.append(clean_seq)
+                    self.ansi_buf = ""
+                continue
+
+            if char == "\\":
+                self.in_ansi = True
+                self.ansi_buf = char
+                continue
+            elif char == "\x1b":
+                self.in_ansi = True
+                self.ansi_buf = char
+                continue
+
+            if char == "\r":
+                continue
+
+            if char == "\n":
+                if self.word_chars:
+                    out.append("".join(self.word_chars))
+                    self.word_chars = []
+                    self.word_vis_len = 0
+                out.append("\r\n")
+                self.col = 0
+                continue
+
+            if char in (" ", "\t"):
+                if self.col + self.word_vis_len > self.max_cols and self.col > 0:
+                    out.append("\r\n")
+                    self.col = 0
+                if self.word_chars:
+                    out.append("".join(self.word_chars))
+                    self.col += self.word_vis_len
+                    self.word_chars = []
+                    self.word_vis_len = 0
+                out.append(char)
+                self.col += 1
+                continue
+
+            self.word_chars.append(char)
+            self.word_vis_len += 1
+
+            if self.col + self.word_vis_len > self.max_cols and self.col > 0:
+                out.append("\r\n")
+                self.col = 0
+
+        return "".join(out)
+
+    def flush(self) -> str:
+        out = []
+        if self.in_ansi and self.ansi_buf:
+            out.append(self.ansi_buf)
+            self.in_ansi = False
+            self.ansi_buf = ""
+        if self.word_chars:
+            if self.col + self.word_vis_len > self.max_cols and self.col > 0:
+                out.append("\r\n")
+            out.append("".join(self.word_chars))
+            self.word_chars = []
+            self.word_vis_len = 0
+        return "".join(out)
+
+
 class DirectiveFilter:
     """Filtra diretivas de download em tempo real durante o streaming.
     Linhas iniciadas por DOWNLOAD:<path> ou MEDIA:<path> são suprimidas da tela
@@ -477,55 +561,9 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                                             spinner_active = False
                                             conn.sendall(encode_dos(CLR_AGENT))
 
-                                        raw_accumulator += safe_content
-
-                                    while True:
-                                        match = ANSI_CAPTURE.search(raw_accumulator)
-                                        if not match:
-                                            break
-
-                                        start, end = match.span()
-                                        text_before = raw_accumulator[:start]
-                                        for char in text_before:
-                                            if char == "\n":
-                                                conn.sendall(encode_dos("\r\n"))
-                                                col_count = 0
-                                            else:
-                                                if col_count >= MAX_COLS and char == " ":
-                                                    conn.sendall(encode_dos("\r\n"))
-                                                    col_count = 0
-                                                else:
-                                                    conn.sendall(encode_dos(char))
-                                                    col_count += 1
-
-                                        raw_seq = match.group(0)
-                                        clean_ansi = re.sub(r'^(\\033|\\x1b|\\e|\x1b)', '\x1b', raw_seq)
-                                        conn.sendall(encode_dos(clean_ansi))
-                                        raw_accumulator = raw_accumulator[end:]
-
-                                    if raw_accumulator:
-                                        last_esc_pos = max(
-                                            raw_accumulator.rfind("\\"),
-                                            raw_accumulator.rfind("\x1b")
-                                        )
-                                        if last_esc_pos == -1:
-                                            safe_text = raw_accumulator
-                                            raw_accumulator = ""
-                                        else:
-                                            safe_text = raw_accumulator[:last_esc_pos]
-                                            raw_accumulator = raw_accumulator[last_esc_pos:]
-
-                                        for char in safe_text:
-                                            if char == "\n":
-                                                conn.sendall(encode_dos("\r\n"))
-                                                col_count = 0
-                                            else:
-                                                if col_count >= MAX_COLS and char == " ":
-                                                    conn.sendall(encode_dos("\r\n"))
-                                                    col_count = 0
-                                                else:
-                                                    conn.sendall(encode_dos(char))
-                                                    col_count += 1
+                                        wrapped_text = word_wrapper.feed(safe_content)
+                                        if wrapped_text:
+                                            conn.sendall(encode_dos(wrapped_text))
 
                         elif state == "final":
                             # Consulta dados consolidados da sessão no Gateway (input, output, total de contexto)
