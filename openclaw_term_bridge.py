@@ -744,6 +744,73 @@ def handle_zmodem_upload(conn: socket.socket, target_dir_arg: str = ""):
     conn.sendall(encode_dos(msg))
 
 
+def get_session_model(session_id: str, agent: str) -> str:
+    """Consulta o modelo configurado para a sessão no Gateway OpenClaw."""
+    agent_id = agent.split("/", 1)[1] if "/" in agent else agent
+    session_key = f"agent:{agent_id}:openai-user:{session_id}"
+    try:
+        with ws_connect(OPENCLAW_WS_URL, close_timeout=3) as ws:
+            ws.recv()
+            ws.send(json.dumps({
+                "type": "req", "id": "c-1", "method": "connect",
+                "params": {
+                    "minProtocol": 4, "maxProtocol": 4,
+                    "client": {"id": "cli", "version": "1.0.0", "platform": "macos", "mode": "cli"},
+                    "role": "operator", "scopes": ["operator.read", "operator.write"],
+                    "auth": {"token": OPENCLAW_TOKEN}
+                }
+            }))
+            ws.recv()
+            req_id = str(uuid.uuid4())
+            ws.send(json.dumps({
+                "type": "req", "id": req_id, "method": "sessions.list",
+                "params": {"search": session_id, "limit": 5}
+            }))
+            resp = json.loads(ws.recv())
+            payload = resp.get("payload", {})
+            for s in payload.get("sessions", []):
+                if s.get("key") == session_key or session_id in s.get("key", ""):
+                    return s.get("model") or payload.get("defaults", {}).get("model", "padrão")
+            return payload.get("defaults", {}).get("model", "padrão")
+    except Exception:
+        return "padrão"
+
+
+def patch_session_model(session_id: str, new_model: str, agent: str) -> tuple[bool, str]:
+    """Altera dinamicamente o modelo da sessão ativa via RPC sessions.patch no Gateway."""
+    agent_id = agent.split("/", 1)[1] if "/" in agent else agent
+    session_key = f"agent:{agent_id}:openai-user:{session_id}"
+    try:
+        with ws_connect(OPENCLAW_WS_URL, close_timeout=3) as ws:
+            ws.recv()
+            ws.send(json.dumps({
+                "type": "req", "id": "c-1", "method": "connect",
+                "params": {
+                    "minProtocol": 4, "maxProtocol": 4,
+                    "client": {"id": "cli", "version": "1.0.0", "platform": "macos", "mode": "cli"},
+                    "role": "operator", "scopes": ["operator.read", "operator.write"],
+                    "auth": {"token": OPENCLAW_TOKEN}
+                }
+            }))
+            ws.recv()
+            req_id = str(uuid.uuid4())
+            ws.send(json.dumps({
+                "type": "req", "id": req_id, "method": "sessions.patch",
+                "params": {"key": session_key, "model": new_model}
+            }))
+            resp = json.loads(ws.recv())
+            if resp.get("ok"):
+                payload = resp.get("payload", {})
+                resolved = payload.get("resolved", {})
+                active_model = resolved.get("model") or payload.get("entry", {}).get("modelOverride") or new_model
+                return True, active_model
+            else:
+                err = resp.get("error", {}).get("message", "Falha ao alterar modelo")
+                return False, err
+    except Exception as e:
+        return False, str(e)
+
+
 def start_bridge(port: int, agent: str, fixed_session_id: str = None):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -764,12 +831,14 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
            
             session_id = fixed_session_id or generate_session_id()
             session_tokens = 0
+            current_model = get_session_model(session_id, agent)
 
             banner = (
                 f"\r\n{CLR_HEADER}========================================\r\n"
                 f"    OPENCLAW LOCAL AGENT - TERMINAL     \r\n"
                 f"========================================{CLR_RESET}\r\n"
-                f"{CLR_STATUS}[Sessão: {session_id} | /help para comandos | /sz <arq>, /rz [dir]]{CLR_RESET}\r\n\r\n"
+                f"{CLR_STATUS}[Sessão: {session_id} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
+                f"{CLR_STATUS}[Comandos: /help | /model [nome] | /sz <arq> | /rz [dir]]{CLR_RESET}\r\n\r\n"
                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
             )
             conn.sendall(encode_dos(banner))
@@ -800,11 +869,29 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                 session_id = fixed_session_id or generate_session_id()
 
                             session_tokens = 0
+                            current_model = get_session_model(session_id, agent)
                             reset_msg = (
-                                f"\r\n{CLR_STATUS}[Sessão ativa: {session_id}]{CLR_RESET}\r\n"
+                                f"\r\n{CLR_STATUS}[Sessão ativa: {session_id} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
                                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
                             )
                             conn.sendall(encode_dos(reset_msg))
+                            continue
+
+                        if cmd == "/model":
+                            if len(parts) > 1 and parts[1].strip():
+                                target_model = parts[1].strip()
+                                conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Alterando modelo para: {target_model}...]{CLR_RESET}"))
+                                ok, res = patch_session_model(session_id, target_model, agent)
+                                if ok:
+                                    current_model = res
+                                    msg = f"\r\n{CLR_AGENT}[Modelo alterado com sucesso: {CLR_HEADER}{current_model}{CLR_AGENT}]{CLR_RESET}\r\n"
+                                else:
+                                    msg = f"\r\n{CLR_ERROR}[Erro ao alterar modelo: {res}]{CLR_RESET}\r\n"
+                            else:
+                                current_model = get_session_model(session_id, agent)
+                                msg = f"\r\n{CLR_STATUS}[Modelo ativo da sessão: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
+                            conn.sendall(encode_dos(msg))
+                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                             continue
 
                         if cmd in ("/download", "/sz"):
@@ -827,6 +914,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                 f"{CLR_STATUS}/new [id]{CLR_RESET}         - Inicia uma nova conversa\r\n"
                                 f"{CLR_STATUS}/session <id>{CLR_RESET}     - Conecta a uma sessão existente\r\n"
                                 f"{CLR_STATUS}/reset{CLR_RESET}            - Reinicia a sessão atual\r\n"
+                                f"{CLR_STATUS}/model [nome]{CLR_RESET}      - Exibe ou altera o modelo da sessão ativa\r\n"
                                 f"{CLR_STATUS}/sz <arquivo>{CLR_RESET}     - Download via Zmodem para o TeleMate\r\n"
                                 f"{CLR_STATUS}/rz [pasta]{CLR_RESET}       - Upload via Zmodem do TeleMate para o host\r\n"
                                 f"{CLR_STATUS}/help, /?{CLR_RESET}         - Exibe esta ajuda\r\n"
