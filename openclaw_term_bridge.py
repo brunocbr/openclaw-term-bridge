@@ -60,6 +60,9 @@ class BBSSpinner:
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._spin, daemon=True)
 
+    def start():
+        pass
+
     def start(self):
         # Renderiza o 1º frame imediatamente na tela antes de iniciar o timer da thread
         first_frame = f"\r{CLR_STATUS}[{self.message} {self.FRAMES[0]}]{CLR_RESET}"
@@ -319,14 +322,35 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                         
                         usage = stream_openclaw(prompt, conn, agent, session_id, spinner)
                         
+                        # Extração tolerante de cache (OpenAI, Anthropic, LiteLLM)
+                        details = usage.get("prompt_tokens_details", {}) or {}
+                        cached_tok = (
+                            details.get("cached_tokens")
+                            or usage.get("cache_read_input_tokens")
+                            or usage.get("cached_tokens")
+                            or 0
+                        )
+
                         p_tok = usage.get("prompt_tokens", 0)
                         c_tok = usage.get("completion_tokens", 0)
-                        req_tok = usage.get("total_tokens", 0)
-                        session_tokens += req_tok
 
-                        tok_info = (
-                            f"\r\n{CLR_RESET}[P:{p_tok} R:{c_tok} | T:{session_tokens}]{CLR_RESET}\r\n"
-                        )
+                        # Tokens líquidos reais de prompt (descontando cache)
+                        p_net = max(0, p_tok - cached_tok)
+                        req_net_tokens = p_net + c_tok
+                        session_tokens += req_net_tokens
+                        context_tokens = p_tok + c_tok
+
+                        # Formatação do resumo de tokens
+                        if cached_tok > 0:
+                            cache_ratio = (cached_tok / p_tok * 100) if p_tok > 0 else 0.0
+                            tok_info = (
+                                f"\r\n{CLR_RESET}[P:{round(p_net/1024)}k C:{cache_ratio:.0f}% R:{c_tok} | T:{round(context_tokens/1024)}k tok]{CLR_RESET}\r\n"
+                            )
+                        else:
+                            tok_info = (
+                                f"\r\n{CLR_RESET}[P:{round(p_net/1024)} R:{c_tok} | T:{round(context_tokens/1024)}k tok]{CLR_RESET}\r\n"
+                            )
+
                         conn.sendall(encode_dos(tok_info))
                         conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
 
@@ -370,4 +394,3 @@ if __name__ == "__main__":
         print("\n[*] Bridge encerrada.")
     except Exception as e:
         print(f"\n[!] Erro fatal: {e}")
-
