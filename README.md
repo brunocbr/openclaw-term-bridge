@@ -70,6 +70,7 @@ Durante a sessão ativa no terminal, você pode usar os seguintes comandos inlin
 
 - `/new [id]` ou `/reset`: Inicia uma nova sessão limpa (gera novo ID ou usa o fornecido).
 - `/session <id>`: Alterna para uma sessão específica existente.
+- `/model [nome]`: Exibe ou altera dinamicamente o modelo da sessão ativa (ex: `/model claude-sonnet-5-5`).
 - `/sz <arquivo>`: Download via Zmodem para o TeleMate.
 - `/rz [pasta]`: Upload via Zmodem do TeleMate para o host.
 - `/help`, `/?`: Exibe a lista de comandos.
