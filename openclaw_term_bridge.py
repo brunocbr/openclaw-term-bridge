@@ -526,6 +526,31 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                                                     col_count += 1
 
                         elif state == "final":
+                            # Consulta dados consolidados da sessão no Gateway (input, output, total de contexto)
+                            try:
+                                sess_req_id = str(uuid.uuid4())
+                                ws.send(json.dumps({
+                                    "type": "req",
+                                    "id": sess_req_id,
+                                    "method": "sessions.list",
+                                    "params": {"search": session_id, "limit": 5}
+                                }))
+                                while True:
+                                    resp_raw = ws.recv(timeout=1.5)
+                                    resp_msg = json.loads(resp_raw)
+                                    if resp_msg.get("type") == "res" and resp_msg.get("id") == sess_req_id:
+                                        sessions = resp_msg.get("payload", {}).get("sessions", [])
+                                        for s in sessions:
+                                            if s.get("key") == session_key or session_id in s.get("key", ""):
+                                                usage["inputTokens"] = s.get("inputTokens", 0)
+                                                if not usage.get("outputTokens"):
+                                                    usage["outputTokens"] = s.get("outputTokens", 0)
+                                                usage["totalTokens"] = s.get("totalTokens", 0)
+                                                usage["contextTokens"] = s.get("contextTokens", 0)
+                                                break
+                                        break
+                            except Exception:
+                                pass
                             break
 
                         elif state == "error":
@@ -825,15 +850,18 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
 
                         p_tok = usage.get("prompt_tokens") or usage.get("inputTokens") or 0
                         c_tok = usage.get("completion_tokens") or usage.get("outputTokens") or 0
+                        total_tok = usage.get("total_tokens") or usage.get("totalTokens") or 0
 
                         if p_tok > 0:
                             p_net = max(0, p_tok - cached_tok)
-                            context_tokens = p_tok + c_tok
+                            context_tokens = total_tok if total_tok > 0 else (p_tok + c_tok)
+                            p_display = f"{round(p_net/1024)}k" if p_net >= 1024 else str(p_net)
+                            t_display = f"{round(context_tokens/1024)}k" if context_tokens >= 1024 else str(context_tokens)
                             if cached_tok > 0:
                                 cache_ratio = (cached_tok / p_tok * 100)
-                                tok_info = f"\r\n{CLR_RESET}[P:{round(p_net/1024)}k C:{cache_ratio:.0f}% R:{c_tok} | T:{round(context_tokens/1024)}k tok]{CLR_RESET}\r\n"
+                                tok_info = f"\r\n{CLR_RESET}[P:{p_display} C:{cache_ratio:.0f}% R:{c_tok} | T:{t_display} tok]{CLR_RESET}\r\n"
                             else:
-                                tok_info = f"\r\n{CLR_RESET}[P:{round(p_net/1024)} R:{c_tok} | T:{round(context_tokens/1024)}k tok]{CLR_RESET}\r\n"
+                                tok_info = f"\r\n{CLR_RESET}[P:{p_display} R:{c_tok} | T:{t_display} tok]{CLR_RESET}\r\n"
                         elif c_tok > 0:
                             tok_info = f"\r\n{CLR_RESET}[R:{c_tok} tok]{CLR_RESET}\r\n"
                         else:
