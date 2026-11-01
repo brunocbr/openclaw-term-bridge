@@ -317,7 +317,7 @@ class BBSPager:
                 # Na primeira página, desconta a linha do prompt anterior e a linha do prompt -- Mais --
                 threshold = max(3, self.page_lines - 2) if self.is_first_page else max(3, self.page_lines - 1)
                 if self.lines_count >= threshold:
-                    prompt = f"\r{CLR_STATUS}-- Mais -- [Espaco: continua | Q: sair]{CLR_RESET} "
+                    prompt = f"\r{CLR_STATUS}-- Mais --{CLR_RESET} "
                     self.conn.sendall(encode_dos(prompt))
                     
                     user_key = self._wait_key()
