@@ -5,6 +5,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -28,7 +29,7 @@ DEFAULT_PORT = 8888
 DEFAULT_AGENT = "openclaw/main"
 
 load_dotenv(Path.home() / ".env")
-OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "seu_token_fallback")
+OPENCLAW_TOKEN = os.environ.get("OPENCLAW_TOKEN", "seu_token_fallback")
 
 # Captura qualquer padrão de escape ANSI (byte ESC real ou notação literal)
 ANSI_CAPTURE = re.compile(r'(\\033|\\x1b|\\e|\x1b)\[[0-9;]*[a-zA-Z]')
@@ -56,6 +57,57 @@ PHASE_LABELS = {
     "thinking": "Raciocinando...",
 }
 
+TEXT_EXTENSIONS = {
+    ".txt", ".text", ".md", ".markdown", ".c", ".h", ".cpp", ".pas",
+    ".bas", ".asm", ".py", ".sh", ".bat", ".cmd", ".json", ".xml",
+    ".html", ".htm", ".css", ".js", ".ts", ".ini", ".cfg", ".conf",
+    ".log", ".csv", ".tsv", ".nfo", ".diz", ".ans", ".asc", ".me", ".1st"
+}
+
+
+def is_text_file(filepath: str) -> bool:
+    """Verifica se o arquivo é texto através da extensão ou inspeção de bytes."""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in TEXT_EXTENSIONS:
+        return True
+    try:
+        with open(filepath, "rb") as f:
+            chunk = f.read(1024)
+            if not chunk:
+                return True
+            if b"\x00" in chunk:
+                return False
+            try:
+                chunk.decode("utf-8")
+                return True
+            except UnicodeDecodeError:
+                try:
+                    chunk.decode("cp850")
+                    return True
+                except UnicodeDecodeError:
+                    return False
+    except Exception:
+        return False
+
+
+def convert_utf8_to_cp850_crlf(content_bytes: bytes) -> bytes:
+    """Converte conteúdo de texto UTF-8 (Unix LF) para CP850 (DOS CRLF)."""
+    try:
+        text = content_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        text = content_bytes.decode("latin-1", errors="replace")
+
+    sanitized = sanitize_text(text)
+    normalized_crlf = sanitized.replace("\r\n", "\n").replace("\n", "\r\n")
+    return normalized_crlf.encode("cp850", errors="replace")
+
+
+def convert_cp850_to_utf8_lf(content_bytes: bytes) -> bytes:
+    """Converte conteúdo de texto CP850 (DOS CRLF) para UTF-8 (Unix LF)."""
+    text = content_bytes.decode("cp850", errors="replace")
+    normalized_lf = text.replace("\r\n", "\n")
+    return normalized_lf.encode("utf-8")
+
 
 def format_tool_status(name: str, title: str = None) -> str:
     """Formata o status de execução de ferramenta para o spinner de 78 colunas."""
@@ -63,7 +115,6 @@ def format_tool_status(name: str, title: str = None) -> str:
     if not title:
         return f"{label}..."
     t = title.strip()
-    # Remove prefixos redundantes gerados por agentes
     for prefix in ("Exec ", "exec ", "command ", "Command "):
         if t.startswith(prefix):
             t = t[len(prefix):].strip()
@@ -482,7 +533,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
 
 
 def handle_zmodem_download(conn: socket.socket, file_arg: str):
-    """Envia um arquivo para o TeleMate via ZMODEM (sz)."""
+    """Envia um arquivo para o TeleMate via ZMODEM (sz) com conversão automática UTF-8 -> CP850 (CRLF)."""
     sz_bin = shutil.which("sz")
     if not sz_bin:
         conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: 'sz' (lrzsz) não encontrado. Instale com: brew install lrzsz]{CLR_RESET}\r\n"))
@@ -493,8 +544,27 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
         conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: Arquivo não encontrado ou inválido: {filepath}]{CLR_RESET}\r\n"))
         return
 
-    file_size = os.path.getsize(filepath)
-    file_name = os.path.basename(filepath)
+    temp_dir = None
+    target_send_path = filepath
+    is_text = is_text_file(filepath)
+
+    if is_text:
+        try:
+            with open(filepath, "rb") as f:
+                raw_bytes = f.read()
+            converted_bytes = convert_utf8_to_cp850_crlf(raw_bytes)
+            
+            temp_dir = tempfile.mkdtemp(prefix="telemate_dl_")
+            temp_file = os.path.join(temp_dir, os.path.basename(filepath))
+            with open(temp_file, "wb") as f:
+                f.write(converted_bytes)
+            target_send_path = temp_file
+            conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Conversão de texto ativa: UTF-8 (Unix) -> CP850 (DOS CRLF)]{CLR_RESET}"))
+        except Exception:
+            target_send_path = filepath
+
+    file_size = os.path.getsize(target_send_path)
+    file_name = os.path.basename(target_send_path)
     conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Iniciando ZMODEM Download: {file_name} ({file_size} bytes)...]{CLR_RESET}\r\n"))
     time.sleep(0.3)
 
@@ -510,7 +580,7 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
     try:
         fd = conn.fileno()
         proc = subprocess.run(
-            [sz_bin, "-b", "--zmodem", filepath],
+            [sz_bin, "-b", "--zmodem", target_send_path],
             stdin=fd,
             stdout=fd,
             stderr=subprocess.DEVNULL
@@ -521,12 +591,18 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
             msg = f"\r\n{CLR_ERROR}[ZMODEM: Transferência abortada ou erro ({proc.returncode})]{CLR_RESET}\r\n"
     except Exception as e:
         msg = f"\r\n{CLR_ERROR}[Erro na execução do Zmodem: {e}]{CLR_RESET}\r\n"
+    finally:
+        if temp_dir and os.path.isdir(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
 
     conn.sendall(encode_dos(msg))
 
 
 def handle_zmodem_upload(conn: socket.socket, target_dir_arg: str = ""):
-    """Recebe um arquivo vindo do TeleMate via ZMODEM (rz)."""
+    """Recebe um arquivo vindo do TeleMate via ZMODEM (rz) com conversão automática CP850 (DOS CRLF) -> UTF-8 (Unix LF)."""
     rz_bin = shutil.which("rz")
     if not rz_bin:
         conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: 'rz' (lrzsz) não encontrado. Instale com: brew install lrzsz]{CLR_RESET}\r\n"))
@@ -539,6 +615,16 @@ def handle_zmodem_upload(conn: socket.socket, target_dir_arg: str = ""):
         except Exception as e:
             conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro ao criar pasta destino: {e}]{CLR_RESET}\r\n"))
             return
+
+    # Mapeia arquivos existentes e seus timestamps para detectar novos uploads
+    files_before = {}
+    try:
+        for fname in os.listdir(dest_dir):
+            full_p = os.path.join(dest_dir, fname)
+            if os.path.isfile(full_p):
+                files_before[fname] = os.path.getmtime(full_p)
+    except Exception:
+        pass
 
     conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Aguardando ZMODEM Upload em: {dest_dir}...]{CLR_RESET}\r\n"))
     conn.sendall(encode_dos(f"{CLR_STATUS}[Dica: Pressione PgUp no TeleMate se o envio não iniciar sozinho]{CLR_RESET}\r\n"))
@@ -563,6 +649,25 @@ def handle_zmodem_upload(conn: socket.socket, target_dir_arg: str = ""):
         )
         if proc.returncode == 0:
             msg = f"\r\n{CLR_AGENT}[ZMODEM: Upload concluído com sucesso]{CLR_RESET}\r\n"
+            conn.sendall(encode_dos(msg))
+
+            # Detecta arquivos novos ou modificados para converter CP850 -> UTF-8
+            try:
+                for fname in os.listdir(dest_dir):
+                    full_p = os.path.join(dest_dir, fname)
+                    if os.path.isfile(full_p):
+                        mtime = os.path.getmtime(full_p)
+                        if fname not in files_before or mtime > files_before[fname]:
+                            if is_text_file(full_p):
+                                with open(full_p, "rb") as f:
+                                    raw_b = f.read()
+                                utf8_b = convert_cp850_to_utf8_lf(raw_b)
+                                with open(full_p, "wb") as f:
+                                    f.write(utf8_b)
+                                conn.sendall(encode_dos(f"{CLR_STATUS}[Arquivo convertido para UTF-8 (Unix LF): {fname}]{CLR_RESET}\r\n"))
+            except Exception as conv_err:
+                conn.sendall(encode_dos(f"{CLR_STATUS}[Aviso na conversão UTF-8: {conv_err}]{CLR_RESET}\r\n"))
+            return
         else:
             msg = f"\r\n{CLR_ERROR}[ZMODEM: Transferência abortada ou erro ({proc.returncode})]{CLR_RESET}\r\n"
     except Exception as e:

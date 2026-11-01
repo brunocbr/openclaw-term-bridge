@@ -6,7 +6,13 @@ Ponte (bridge) TCP/Socket para conectar emuladores de terminal retrô (como **Te
 
 - **Status Dinâmico no Spinner BBS:** Mostra em tempo real o que o agente está fazendo (`[Preparando ambiente... /]`, `[Terminal: git status -]`, `[Lendo arquivo: teste.txt \]`, `[Pensando... |]`) mantendo a animação clássica de BBS/TeleMate sem quebrar a linha.
 - **WebSocket Nativo do Gateway:** Conexão direta com o Gateway OpenClaw (`ws://127.0.0.1:18789`), recebendo eventos de ciclo de vida (`run_status`, `item` de ferramentas e aprovações de execução).
-- **ZMODEM Integrado:** Disparo automático de download (`DOWNLOAD:<path>`) e comandos in-band `/sz <arquivo>` e `/rz [pasta]` compatíveis com o TeleMate no DOS.
+- **ZMODEM com Conversão Automática UTF-8 <-> CP850:** Ponte bidirecional entre o DOS e o sistema moderno!
+  - **Download (Host -> DOS):** Arquivos texto UTF-8 são convertidos automaticamente para CP850 com finais de linha CRLF (
+), permitindo edição perfeita no DOS Edit ou visualização no TeleMate.
+  - **Upload (DOS -> Host):** Arquivos texto recebidos do DOS em CP850 são convertidos automaticamente para UTF-8 com finais de linha Unix LF (
+).
+  - **Binários Protegidos:** Arquivos binários (.zip, .exe, .gif, etc.) permanecem intocados em modo binário puro.
+- **ZMODEM Integrado:** Disparo automático de download (`DOWNLOAD:<path>`) e comandos in-band `/sz <arquivo>` e `/rz [pasta]`.
 - **Codificação CP850:** Suporte nativo à acentuação do português no padrão DOS (Code Page 850), com sanitização automática de caracteres Unicode incompatíveis.
 - **Cores ANSI:** Compatível com `ANSI.SYS`, convertendo sequências de escape literais (`\033`, `\x1b`, `\e`) em bytes de escape reais para renderização colorida no terminal.
 - **Quebra de Linha Automática:** Ajuste de fluxo em ~76 colunas para evitar estouro em terminais padrão 80x25.
