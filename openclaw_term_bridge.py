@@ -426,7 +426,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
         "Para cores use prefixo \\e[ (reset \\e[0m):\n"
         "Cores: \\e[1;36m=Ciano \\e[1;33m=Amarelo \\e[1;32m=Verde \\e[1;31m=Vermelho \\e[1;35m=Magenta\n"
         "Exemplo: \\e[1;35m[AGENTE]\\e[0m \\e[1;36mStatus:\\e[0m \\e[1;32mOK\\e[0m\n"
-        "Para enviar arquivos ao usuário via download Zmodem no TeleMate, insira no final em linha própria: DOWNLOAD:<caminho_do_arquivo>]\n\n"
+        "Para enviar arquivos via download Zmodem no TeleMate, insira no final em linha própria: DOWNLOAD:<caminho_absoluto>. Para múltiplos arquivos, insira uma linha DOWNLOAD separada para cada arquivo. O bridge gerencia automaticamente a conversão para CP850, formatação DOS 8.3 e o protocolo Zmodem sem necessidade de etapas manuais ou de inspeção do bridge.]\n\n"
     )
     full_message = env_context + prompt
 
