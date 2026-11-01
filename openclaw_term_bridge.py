@@ -863,11 +863,17 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
             awaiting_model_menu = False
 
             banner = (
-                f"\r\n{CLR_HEADER}========================================\r\n"
-                f"    OPENCLAW LOCAL AGENT - TERMINAL     \r\n"
-                f"========================================{CLR_RESET}\r\n"
-                f"{CLR_STATUS}[Sessão: {session_id} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
-                f"{CLR_STATUS}[Comandos: /help | /model [nome] | /sz <arq> | /rz [dir]]{CLR_RESET}\r\n\r\n"
+                f"\r\n{CLR_HEADER}"
+                f"       ___                   _____ _\r\n"
+                f"      / _ \ _ __   ___ _ __ / __ _| | __ ___      __\r\n"
+                f"     | | | | '_ \ / _ \ '_ \ |    | |/ _` \ \ /\ \ /\r\n"
+                f"     | |_| | |_) |  __/ | | | |___| | (_| |\ V  V /\r\n"
+                f"      \___/| .__/ \___|_| |_|\____|_|\__,_| \_/\_/\r\n"
+                f"           |_| {CLR_PROMPT}PORT: {port}{CLR_HEADER}    {CLR_AGENT}AGENTE: {agent}{CLR_RESET}\r\n"
+                f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}\r\n"
+                f"{CLR_STATUS}    [Sessão: {session_id} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
+                f"{CLR_STATUS}    [Comandos: /help | /model | /sz <arq> | /rz [dir]]{CLR_RESET}\r\n"
+                f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}\r\n\r\n"
                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
             )
             conn.sendall(encode_dos(banner))
