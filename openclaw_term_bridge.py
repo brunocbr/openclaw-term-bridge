@@ -9,8 +9,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
-import requests
 from dotenv import load_dotenv
+from websockets.sync.client import connect as ws_connect
 
 # Códigos de Cor ANSI padrão (TeleMate / MS-DOS ANSI.SYS)
 CLR_RESET   = "\x1b[0m"
@@ -21,7 +21,7 @@ CLR_PROMPT  = "\x1b[1;35m"
 CLR_USER    = "\x1b[1;37m"
 CLR_ERROR   = "\x1b[1;31m"
 
-OPENCLAW_URL = "http://localhost:18789/v1/chat/completions"
+OPENCLAW_WS_URL = os.getenv("OPENCLAW_WS_URL", "ws://127.0.0.1:18789")
 HOST = "127.0.0.1"
 
 DEFAULT_PORT = 8888
@@ -33,6 +33,42 @@ OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "seu_token_fallback")
 # Captura qualquer padrão de escape ANSI (byte ESC real ou notação literal)
 ANSI_CAPTURE = re.compile(r'(\\033|\\x1b|\\e|\x1b)\[[0-9;]*[a-zA-Z]')
 DIRECTIVE_PREFIXES = ("DOWNLOAD:", "MEDIA:", "[[DOWNLOAD:")
+
+# Dicionários de tradução e mapeamento amigável para o terminal retrô
+TOOL_LABELS = {
+    "exec": "Terminal",
+    "read": "Lendo arquivo",
+    "write": "Gravando arquivo",
+    "edit": "Editando arquivo",
+    "web_search": "Pesquisando na web",
+    "web_fetch": "Baixando página web",
+    "memory_search": "Buscando na memória",
+    "memory_get": "Lendo memória",
+    "sessions_search": "Buscando histórico",
+    "sessions_history": "Lendo histórico",
+    "apply_patch": "Aplicando patch",
+}
+
+PHASE_LABELS = {
+    "preparing_workspace": "Preparando ambiente...",
+    "preparing_context": "Lendo contexto e memória...",
+    "starting_model": "Pensando...",
+    "thinking": "Raciocinando...",
+}
+
+
+def format_tool_status(name: str, title: str = None) -> str:
+    """Formata o status de execução de ferramenta para o spinner de 78 colunas."""
+    label = TOOL_LABELS.get(name, name)
+    if not title:
+        return f"{label}..."
+    t = title.strip()
+    # Remove prefixos redundantes gerados por agentes
+    for prefix in ("Exec ", "exec ", "command ", "Command "):
+        if t.startswith(prefix):
+            t = t[len(prefix):].strip()
+    return f"{label}: {t}"
+
 
 class DirectiveFilter:
     """Filtra diretivas de download em tempo real durante o streaming.
@@ -99,6 +135,7 @@ class DirectiveFilter:
             self.current_line = ""
         return output
 
+
 def sanitize_text(text: str) -> str:
     unsupported_map = {
         '“': '"', '”': '"', '‘': "'", '’': "'", '—': '-', '–': '-', '…': '...', '•': '*',
@@ -115,42 +152,68 @@ def sanitize_text(text: str) -> str:
                 res.append("?")
     return "".join(res)
 
+
 def encode_dos(text: str) -> bytes:
     return text.encode("cp850", errors="ignore")
 
+
 class BBSSpinner:
-    """Spinner clássico de BBS com envio em tempo real via TCP sem buffer."""
+    """Spinner clássico de BBS com mensagem dinâmica em tempo real via TCP sem buffer."""
     FRAMES = ["|", "/", "-", "\\"]
 
-    def __init__(self, conn: socket.socket, message: str = "Aguardando"):
+    def __init__(self, conn: socket.socket, message: str = "Conectando..."):
         self.conn = conn
         self.message = message
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._spin, daemon=True)
+        self.lock = threading.Lock()
+        self.last_render_len = 0
 
-    def start():
-        pass
+    def _truncate(self, msg: str, max_chars: int = 54) -> str:
+        """Limita o tamanho do texto para nunca quebrar linha em 78 colunas."""
+        if len(msg) > max_chars:
+            return msg[:max_chars - 3] + "..."
+        return msg
 
     def start(self):
-        # Renderiza o 1º frame imediatamente na tela antes de iniciar o timer da thread
-        first_frame = f"\r{CLR_STATUS}[{self.message} {self.FRAMES[0]}]{CLR_RESET}"
-        try:
-            self.conn.sendall(encode_dos(first_frame))
-        except Exception:
-            pass
+        with self.lock:
+            safe_msg = self._truncate(self.message)
+            first_frame = f"\r{CLR_STATUS}[{safe_msg} {self.FRAMES[0]}]{CLR_RESET}"
+            self.last_render_len = len(safe_msg) + 5
+            try:
+                self.conn.sendall(encode_dos(first_frame))
+            except Exception:
+                pass
         self.thread.start()
+
+    def update_message(self, new_message: str):
+        """Atualiza a mensagem exibida no spinner imediatamente."""
+        with self.lock:
+            if self.stop_event.is_set():
+                return
+            self.message = new_message
+            safe_msg = self._truncate(self.message)
+            frame = self.FRAMES[0]
+            current_len = len(safe_msg) + 5
+            padding = " " * max(0, self.last_render_len - current_len)
+            self.last_render_len = max(self.last_render_len, current_len)
+            text = f"\r{CLR_STATUS}[{safe_msg} {frame}]{CLR_RESET}{padding}"
+            try:
+                self.conn.sendall(encode_dos(text))
+            except Exception:
+                pass
 
     def stop(self):
         if not self.stop_event.is_set():
             self.stop_event.set()
             if self.thread.is_alive():
                 self.thread.join(timeout=0.5)
-            # Sobrescreve com espaços e volta o cursor para a margem esquerda
-            clear_len = len(self.message) + 8
-            try:
-                self.conn.sendall(encode_dos("\r" + (" " * clear_len) + "\r"))
-            except Exception:
-                pass
+            with self.lock:
+                clear_len = max(self.last_render_len, len(self.message) + 8) + 8
+                try:
+                    self.conn.sendall(encode_dos("\r" + (" " * clear_len) + "\r"))
+                except Exception:
+                    pass
 
     def _spin(self):
         idx = 1
@@ -158,151 +221,235 @@ class BBSSpinner:
             self.stop_event.wait(0.12)
             if self.stop_event.is_set():
                 break
-            frame = self.FRAMES[idx % len(self.FRAMES)]
-            text = f"\r{CLR_STATUS}[{self.message} {frame}]{CLR_RESET}"
-            try:
-                self.conn.sendall(encode_dos(text))
-            except Exception:
-                break
+            with self.lock:
+                safe_msg = self._truncate(self.message)
+                frame = self.FRAMES[idx % len(self.FRAMES)]
+                current_len = len(safe_msg) + 5
+                padding = " " * max(0, self.last_render_len - current_len)
+                self.last_render_len = max(self.last_render_len, current_len)
+                text = f"\r{CLR_STATUS}[{safe_msg} {frame}]{CLR_RESET}{padding}"
+                try:
+                    self.conn.sendall(encode_dos(text))
+                except Exception:
+                    break
             idx += 1
+
 
 def generate_session_id() -> str:
     return f"term-{uuid.uuid4().hex[:8]}"
 
+
 def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str, spinner: BBSSpinner):
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENCLAW_TOKEN}"
-    }
-    payload = {
-        "model": agent,
-        "user": session_id,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Ambiente: Terminal DOS TeleMate em ANSI, CP850, 78 colunas máx.\n"
-                    "Sempre use acentuação normal em português (á, é, ã, ç, etc.).\n"
-                    "Proibido Markdown (** ## |). Para cores use prefixo \\e[ (reset \\e[0m):\n"
-                    "Cores: \\e[1;36m=Ciano \\e[1;33m=Amarelo \\e[1;32m=Verde \\e[1;31m=Vermelho \\e[1;35m=Magenta\n"
-                    "Exemplo: \\e[1;35m[AGENTE]\\e[0m \\e[1;36mStatus:\\e[0m \\e[1;32mOK\\e[0m\n"
-                    "Para enviar arquivos ao usuário via download Zmodem no TeleMate, insira no final em linha própria: DOWNLOAD:<caminho_do_arquivo>"
-                )
-            },
-            {"role": "user", "content": prompt}
-        ],
-        "stream": True,
-        "stream_options": {"include_usage": True}
-    }
-    
+    """Executa prompt via WebSocket nativo do Gateway OpenClaw com eventos e streaming."""
     usage = {}
     spinner_active = True
     directive_filter = DirectiveFilter()
+    col_count = 0
+    MAX_COLS = 76
+    raw_accumulator = ""
+
+    # Normaliza identificador do agente e chave de sessão
+    agent_id = agent.split("/", 1)[1] if "/" in agent else agent
+    session_key = f"agent:{agent_id}:openai-user:{session_id}"
+
+    # Contexto de formato para TeleMate injetado no prompt
+    env_context = (
+        "[Contexto: Terminal DOS TeleMate em ANSI, CP850, 78 colunas máx.\n"
+        "Sempre use acentuação normal em português (á, é, ã, ç, etc.).\n"
+        "Proibido Markdown (** ## |). Para cores use prefixo \\e[ (reset \\e[0m):\n"
+        "Cores: \\e[1;36m=Ciano \\e[1;33m=Amarelo \\e[1;32m=Verde \\e[1;31m=Vermelho \\e[1;35m=Magenta\n"
+        "Exemplo: \\e[1;35m[AGENTE]\\e[0m \\e[1;36mStatus:\\e[0m \\e[1;32mOK\\e[0m\n"
+        "Para enviar arquivos ao usuário via download Zmodem no TeleMate, insira no final em linha própria: DOWNLOAD:<caminho_do_arquivo>]\n\n"
+    )
+    full_message = env_context + prompt
 
     try:
-        response = requests.post(
-            OPENCLAW_URL, 
-            headers=headers, 
-            json=payload, 
-            stream=True, 
-            timeout=300
-        )
+        spinner.update_message("Conectando ao Gateway...")
+        with ws_connect(OPENCLAW_WS_URL, close_timeout=5) as ws:
+            # 1. Aguarda desafio de conexão (connect.challenge)
+            challenge_raw = ws.recv()
+            challenge = json.loads(challenge_raw)
 
-        if response.status_code != 200:
-            spinner.stop()
-            spinner_active = False
-            err_msg = f"{CLR_ERROR}[Erro OpenClaw: {response.status_code}]{CLR_RESET}\r\n"
-            conn.sendall(encode_dos(err_msg))
-            return usage, directive_filter.downloads
+            # 2. Handshake autenticado (connect -> hello-ok)
+            connect_req_id = "connect-1"
+            connect_req = {
+                "type": "req",
+                "id": connect_req_id,
+                "method": "connect",
+                "params": {
+                    "minProtocol": 4,
+                    "maxProtocol": 4,
+                    "client": {
+                        "id": "cli",
+                        "version": "1.0.0",
+                        "platform": "macos",
+                        "mode": "cli"
+                    },
+                    "role": "operator",
+                    "scopes": ["operator.read", "operator.write", "operator.approvals"],
+                    "caps": ["tool-events"],
+                    "auth": {"token": OPENCLAW_TOKEN},
+                    "locale": "pt-BR",
+                    "userAgent": "openclaw-term-bridge/2.0"
+                }
+            }
+            ws.send(json.dumps(connect_req))
+            hello_resp = json.loads(ws.recv())
+            if not hello_resp.get("ok"):
+                spinner.stop()
+                spinner_active = False
+                err = hello_resp.get("error", {}).get("message", "Falha no handshake")
+                conn.sendall(encode_dos(f"{CLR_ERROR}[Erro no Gateway: {err}]{CLR_RESET}\r\n"))
+                return usage, directive_filter.downloads
 
-        col_count = 0
-        MAX_COLS = 76
-        raw_accumulator = ""
+            # 3. Dispara chat.send
+            spinner.update_message("Iniciando requisição...")
+            chat_req_id = str(uuid.uuid4())
+            send_req = {
+                "type": "req",
+                "id": chat_req_id,
+                "method": "chat.send",
+                "params": {
+                    "sessionKey": session_key,
+                    "message": full_message,
+                    "idempotencyKey": str(uuid.uuid4())
+                }
+            }
+            ws.send(json.dumps(send_req))
 
-        for line in response.iter_lines():
-            if not line:
-                continue
-            
-            line_str = line.decode("utf-8")
-            if line_str.startswith("data: "):
-                data_str = line_str[6:].strip()
-                if data_str == "[DONE]":
+            target_run_id = None
+
+            while True:
+                msg_raw = ws.recv()
+                if not msg_raw:
                     break
-                
-                try:
-                    chunk_json = json.loads(data_str)
+                msg = json.loads(msg_raw)
+                m_type = msg.get("type")
 
-                    if chunk_json.get("usage"):
-                        usage = chunk_json["usage"]
-
-                    choices = chunk_json.get("choices", [])
-                    if choices:
-                        delta = choices[0].get("delta", {})
-                        content = delta.get("content", "")
-                        
-                        if content:
-                            safe_content = directive_filter.feed(sanitize_text(content))
-                            if safe_content:
-                                # Apaga o spinner APENAS no exato instante em que o primeiro caractere for renderizado
-                                if spinner_active:
-                                    spinner.stop()
-                                    spinner_active = False
-                                    conn.sendall(encode_dos(CLR_AGENT))
-
-                                raw_accumulator += safe_content
-                                
-                                while True:
-                                    match = ANSI_CAPTURE.search(raw_accumulator)
-                                    if not match:
-                                        break
-                                    
-                                    start, end = match.span()
-                                    
-                                    text_before = raw_accumulator[:start]
-                                    for char in text_before:
-                                        if char == "\n":
-                                            conn.sendall(encode_dos("\r\n"))
-                                            col_count = 0
-                                        else:
-                                            if col_count >= MAX_COLS and char == " ":
-                                                conn.sendall(encode_dos("\r\n"))
-                                                col_count = 0
-                                            else:
-                                                conn.sendall(encode_dos(char))
-                                                col_count += 1
-                                                
-                                    raw_seq = match.group(0)
-                                    clean_ansi = re.sub(r'^(\\033|\\x1b|\\e|\x1b)', '\x1b', raw_seq)
-                                    conn.sendall(encode_dos(clean_ansi))
-                                    
-                                    raw_accumulator = raw_accumulator[end:]
-
-                                if raw_accumulator:
-                                    last_esc_pos = max(
-                                        raw_accumulator.rfind("\\"), 
-                                        raw_accumulator.rfind("\x1b")
-                                    )
-                                    if last_esc_pos == -1:
-                                        safe_text = raw_accumulator
-                                        raw_accumulator = ""
-                                    else:
-                                        safe_text = raw_accumulator[:last_esc_pos]
-                                        raw_accumulator = raw_accumulator[last_esc_pos:]
-
-                                    for char in safe_text:
-                                        if char == "\n":
-                                            conn.sendall(encode_dos("\r\n"))
-                                            col_count = 0
-                                        else:
-                                            if col_count >= MAX_COLS and char == " ":
-                                                conn.sendall(encode_dos("\r\n"))
-                                                col_count = 0
-                                            else:
-                                                conn.sendall(encode_dos(char))
-                                                col_count += 1
-
-                except json.JSONDecodeError:
+                # Resposta da chamada chat.send
+                if m_type == "res" and msg.get("id") == chat_req_id:
+                    if not msg.get("ok"):
+                        spinner.stop()
+                        spinner_active = False
+                        err = msg.get("error", {}).get("message", "Erro ao enviar chat")
+                        conn.sendall(encode_dos(f"{CLR_ERROR}[Erro chat.send: {err}]{CLR_RESET}\r\n"))
+                        return usage, directive_filter.downloads
+                    target_run_id = msg.get("payload", {}).get("runId")
                     continue
+
+                if m_type == "event":
+                    event_name = msg.get("event")
+                    payload = msg.get("payload", {})
+
+                    # Filtra apenas eventos pertencentes a esta execução específica
+                    if target_run_id and payload.get("runId") and payload.get("runId") != target_run_id:
+                        continue
+
+                    # 1. Ciclo de Vida do Agente e Ferramentas
+                    if event_name == "agent":
+                        stream = payload.get("stream")
+                        data = payload.get("data", {}) or {}
+
+                        if stream == "run_status":
+                            phase = data.get("phase")
+                            label = PHASE_LABELS.get(phase, f"Processando: {phase}")
+                            if spinner_active:
+                                spinner.update_message(label)
+
+                        elif stream == "item":
+                            phase = data.get("phase")
+                            tool_name = data.get("name") or "tool"
+                            tool_title = data.get("title")
+
+                            if phase == "start" and spinner_active:
+                                status_msg = format_tool_status(tool_name, tool_title)
+                                spinner.update_message(status_msg)
+                            elif phase == "end" and spinner_active:
+                                spinner.update_message("Processando resultado...")
+
+                        elif stream == "usage":
+                            usage = data
+
+                    # 2. Eventos de Aprovação de Execução
+                    elif event_name == "exec.approval.requested":
+                        if spinner_active:
+                            spinner.update_message("Aguardando aprovação de execução...")
+
+                    # 3. Stream de Chat (Texto de Resposta)
+                    elif event_name == "chat":
+                        state = payload.get("state")
+
+                        if state == "delta":
+                            content = payload.get("deltaText", "")
+                            if content:
+                                safe_content = directive_filter.feed(sanitize_text(content))
+                                if safe_content:
+                                    # Desliga o spinner no primeiro caractere renderizável
+                                    if spinner_active:
+                                        spinner.stop()
+                                        spinner_active = False
+                                        conn.sendall(encode_dos(CLR_AGENT))
+
+                                    raw_accumulator += safe_content
+
+                                    while True:
+                                        match = ANSI_CAPTURE.search(raw_accumulator)
+                                        if not match:
+                                            break
+
+                                        start, end = match.span()
+                                        text_before = raw_accumulator[:start]
+                                        for char in text_before:
+                                            if char == "\n":
+                                                conn.sendall(encode_dos("\r\n"))
+                                                col_count = 0
+                                            else:
+                                                if col_count >= MAX_COLS and char == " ":
+                                                    conn.sendall(encode_dos("\r\n"))
+                                                    col_count = 0
+                                                else:
+                                                    conn.sendall(encode_dos(char))
+                                                    col_count += 1
+
+                                        raw_seq = match.group(0)
+                                        clean_ansi = re.sub(r'^(\\033|\\x1b|\\e|\x1b)', '\x1b', raw_seq)
+                                        conn.sendall(encode_dos(clean_ansi))
+                                        raw_accumulator = raw_accumulator[end:]
+
+                                    if raw_accumulator:
+                                        last_esc_pos = max(
+                                            raw_accumulator.rfind("\\"),
+                                            raw_accumulator.rfind("\x1b")
+                                        )
+                                        if last_esc_pos == -1:
+                                            safe_text = raw_accumulator
+                                            raw_accumulator = ""
+                                        else:
+                                            safe_text = raw_accumulator[:last_esc_pos]
+                                            raw_accumulator = raw_accumulator[last_esc_pos:]
+
+                                        for char in safe_text:
+                                            if char == "\n":
+                                                conn.sendall(encode_dos("\r\n"))
+                                                col_count = 0
+                                            else:
+                                                if col_count >= MAX_COLS and char == " ":
+                                                    conn.sendall(encode_dos("\r\n"))
+                                                    col_count = 0
+                                                else:
+                                                    conn.sendall(encode_dos(char))
+                                                    col_count += 1
+
+                        elif state == "final":
+                            break
+
+                        elif state == "error":
+                            if spinner_active:
+                                spinner.stop()
+                                spinner_active = False
+                            err = payload.get("errorMessage") or "Erro na execução da resposta"
+                            conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: {err}]{CLR_RESET}\r\n"))
+                            break
 
         trailing_directive_text = directive_filter.finish()
         if trailing_directive_text:
@@ -328,7 +475,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
     except Exception as e:
         if spinner_active:
             spinner.stop()
-        err_msg = f"{CLR_ERROR}[Erro no stream: {str(e)}]{CLR_RESET}\r\n"
+        err_msg = f"{CLR_ERROR}[Erro no stream WebSocket: {str(e)}]{CLR_RESET}\r\n"
         conn.sendall(encode_dos(err_msg))
 
     return usage, directive_filter.downloads
@@ -362,8 +509,6 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
 
     try:
         fd = conn.fileno()
-        # -b: binary (sem conversão de CR/LF)
-        # --zmodem: força protocolo Zmodem
         proc = subprocess.run(
             [sz_bin, "-b", "--zmodem", filepath],
             stdin=fd,
@@ -424,6 +569,7 @@ def handle_zmodem_upload(conn: socket.socket, target_dir_arg: str = ""):
         msg = f"\r\n{CLR_ERROR}[Erro na execução do Zmodem: {e}]{CLR_RESET}\r\n"
 
     conn.sendall(encode_dos(msg))
+
 
 def start_bridge(port: int, agent: str, fixed_session_id: str = None):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -517,41 +663,38 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                             continue
 
                         conn.sendall(encode_dos("\r\n"))
-                        spinner = BBSSpinner(conn, message="Aguarde")
+                        spinner = BBSSpinner(conn, message="Conectando...")
                         spinner.start()
                         
                         usage, downloads = stream_openclaw(prompt, conn, agent, session_id, spinner)
                         
-                        # Extração tolerante de cache (OpenAI, Anthropic, LiteLLM)
+                        # Extração tolerante de tokens
                         details = usage.get("prompt_tokens_details", {}) or {}
                         cached_tok = (
                             details.get("cached_tokens")
                             or usage.get("cache_read_input_tokens")
-                            or usage.get("cached_tokens")
+                            or usage.get("cacheReadTokens")
                             or 0
                         )
 
-                        p_tok = usage.get("prompt_tokens", 0)
-                        c_tok = usage.get("completion_tokens", 0)
+                        p_tok = usage.get("prompt_tokens") or usage.get("inputTokens") or 0
+                        c_tok = usage.get("completion_tokens") or usage.get("outputTokens") or 0
 
-                        # Tokens líquidos reais de prompt (descontando cache)
-                        p_net = max(0, p_tok - cached_tok)
-                        req_net_tokens = p_net + c_tok
-                        session_tokens += req_net_tokens
-                        context_tokens = p_tok + c_tok
-
-                        # Formatação do resumo de tokens
-                        if cached_tok > 0:
-                            cache_ratio = (cached_tok / p_tok * 100) if p_tok > 0 else 0.0
-                            tok_info = (
-                                f"\r\n{CLR_RESET}[P:{round(p_net/1024)}k C:{cache_ratio:.0f}% R:{c_tok} | T:{round(context_tokens/1024)}k tok]{CLR_RESET}\r\n"
-                            )
+                        if p_tok > 0:
+                            p_net = max(0, p_tok - cached_tok)
+                            context_tokens = p_tok + c_tok
+                            if cached_tok > 0:
+                                cache_ratio = (cached_tok / p_tok * 100)
+                                tok_info = f"\r\n{CLR_RESET}[P:{round(p_net/1024)}k C:{cache_ratio:.0f}% R:{c_tok} | T:{round(context_tokens/1024)}k tok]{CLR_RESET}\r\n"
+                            else:
+                                tok_info = f"\r\n{CLR_RESET}[P:{round(p_net/1024)} R:{c_tok} | T:{round(context_tokens/1024)}k tok]{CLR_RESET}\r\n"
+                        elif c_tok > 0:
+                            tok_info = f"\r\n{CLR_RESET}[R:{c_tok} tok]{CLR_RESET}\r\n"
                         else:
-                            tok_info = (
-                                f"\r\n{CLR_RESET}[P:{round(p_net/1024)} R:{c_tok} | T:{round(context_tokens/1024)}k tok]{CLR_RESET}\r\n"
-                            )
+                            tok_info = ""
 
-                        conn.sendall(encode_dos(tok_info))
+                        if tok_info:
+                            conn.sendall(encode_dos(tok_info))
 
                         if downloads:
                             for dl_path in downloads:
@@ -581,12 +724,13 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
             time.sleep(2)
             print("[*] Pronto para aceitar nova conexão.\n")
 
+
 if __name__ == "__main__":
     env_port = int(os.getenv("PORT", DEFAULT_PORT))
     env_agent = os.getenv("AGENT", DEFAULT_AGENT)
     env_session = os.getenv("SESSION_ID", None)
 
-    parser = argparse.ArgumentParser(description="Bridge OpenClaw para TeleMate Terminal (CP850)")
+    parser = argparse.ArgumentParser(description="Bridge OpenClaw para TeleMate Terminal (CP850 / WebSocket)")
     parser.add_argument("-p", "--port", type=int, default=env_port, help=f"Porta do servidor socket (padrão: {env_port})")
     parser.add_argument("-a", "--agent", type=str, default=env_agent, help=f"Modelo do agente OpenClaw (padrão: {env_agent})")
     parser.add_argument("-s", "--session", type=str, default=env_session, help="ID de sessão fixo para retomar conversas anteriores")

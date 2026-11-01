@@ -1,25 +1,31 @@
 # OpenClaw Terminal Bridge
 
-Ponte (bridge) TCP/Socket para conectar emuladores de terminal retrô (como **TeleMate**, **Terminus**, ou clientes Telnet no MS-DOS/DOSBox) ao agente local **OpenClaw** via API de chat completions com streaming.
+Ponte (bridge) TCP/Socket para conectar emuladores de terminal retrô (como **TeleMate**, **Terminus**, ou clientes Telnet no MS-DOS/DOSBox) ao agente local **OpenClaw** via protocolo **WebSocket nativo** do Gateway com streaming e eventos de ferramentas em tempo real.
 
 ## 🎯 Características
 
+- **Status Dinâmico no Spinner BBS:** Mostra em tempo real o que o agente está fazendo (`[Preparando ambiente... /]`, `[Terminal: git status -]`, `[Lendo arquivo: teste.txt \]`, `[Pensando... |]`) mantendo a animação clássica de BBS/TeleMate sem quebrar a linha.
+- **WebSocket Nativo do Gateway:** Conexão direta com o Gateway OpenClaw (`ws://127.0.0.1:18789`), recebendo eventos de ciclo de vida (`run_status`, `item` de ferramentas e aprovações de execução).
+- **ZMODEM Integrado:** Disparo automático de download (`DOWNLOAD:<path>`) e comandos in-band `/sz <arquivo>` e `/rz [pasta]` compatíveis com o TeleMate no DOS.
 - **Codificação CP850:** Suporte nativo à acentuação do português no padrão DOS (Code Page 850), com sanitização automática de caracteres Unicode incompatíveis.
 - **Cores ANSI:** Compatível com `ANSI.SYS`, convertendo sequências de escape literais (`\033`, `\x1b`, `\e`) em bytes de escape reais para renderização colorida no terminal.
 - **Quebra de Linha Automática:** Ajuste de fluxo em ~76 colunas para evitar estouro em terminais padrão 80x25.
-- **Streaming em Tempo Real:** Transmissão imediata via SSE (Server-Sent Events) com desativação do buffer de Nagle (TCP_NODELAY).
-- **Spinner BBS Clássico:** Indicador visual de espera animado (`| / - \`) que desaparece assim que o primeiro caractere da resposta chega.
-- **Gerenciamento de Sessão:** Suporte a sessões persistentes ou dinâmicas, com comandos in-band para troca ou reset de contexto.
+- **Streaming em Tempo Real:** Transmissão imediata dos tokens gerados com desativação do buffer de Nagle (`TCP_NODELAY`).
+- **Gerenciamento de Sessão:** Suporte a sessões persistentes ou dinâmicas, com comandos in-band para troca ou reset de contexto (`/new`, `/session`, `/reset`).
 - **Telemetria de Tokens & Cache:** Exibição do consumo de tokens (prompt, cache hit ratio, resposta e contexto total) ao término de cada resposta.
 - **Line Editing Básico:** Suporte a eco local e tecla *Backspace* (`\x08`).
 
 ## 📋 Pré-requisitos
 
 - Python 3.8+
-- Instância do **OpenClaw** rodando (padrão em `http://localhost:18789`)
+- Instância do **OpenClaw** rodando com Gateway habilitado (padrão em `ws://localhost:18789`)
 - Dependências Python:
   ```bash
-  pip install requests python-dotenv
+  pip install websockets python-dotenv
+  ```
+- Para transferências Zmodem (opcional, mas recomendado):
+  ```bash
+  brew install lrzsz
   ```
 
 ## ⚙️ Configuração
@@ -56,7 +62,9 @@ Durante a sessão ativa no terminal, você pode usar os seguintes comandos inlin
 
 - `/new [id]` ou `/reset`: Inicia uma nova sessão limpa (gera novo ID ou usa o fornecido).
 - `/session <id>`: Alterna para uma sessão específica existente.
-
+- `/sz <arquivo>`: Download via Zmodem para o TeleMate.
+- `/rz [pasta]`: Upload via Zmodem do TeleMate para o host.
+- `/help`, `/?`: Exibe a lista de comandos.
 
 ## 🖥️ Como Conectar
 
@@ -71,7 +79,6 @@ Configure seu emulador de terminal para conectar via socket/TCP:
 ```bash
 nc 127.0.0.1 8888
 ```
-
 
 ## 📂 Estrutura das Cores ANSI
 
