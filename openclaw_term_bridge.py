@@ -166,6 +166,31 @@ def convert_cp850_to_utf8_lf(content_bytes: bytes) -> bytes:
     return normalized_lf.encode("utf-8")
 
 
+def clear_input_buffer(buffer: str) -> str:
+    """Retorna sequências ANSI para apagar buffer multilinhas e reposicionar o cursor no prompt."""
+    lines = buffer.split("\n")
+    if len(lines) == 1:
+        return "\x08 \x08" * len(buffer)
+    else:
+        seq = ["\r\x1b[K"]
+        for _ in range(len(lines) - 1):
+            seq.append("\x1b[A\r\x1b[K")
+        seq.append(f"\r{CLR_PROMPT}OpenClaw>{CLR_USER} ")
+        return "".join(seq)
+
+
+def render_input_buffer(buffer: str) -> str:
+    """Renderiza visualmente um buffer multilinhas no terminal com prompt de continuação."""
+    lines = buffer.split("\n")
+    if len(lines) == 1:
+        return f"{CLR_USER}{lines[0]}"
+    else:
+        out = [f"{CLR_USER}{lines[0]}"]
+        for l in lines[1:]:
+            out.append(f"\r\n{CLR_PROMPT}..>{CLR_USER} {l}")
+        return "".join(out)
+
+
 def format_tool_status(name: str, title: str = None) -> str:
     """Formata o status de execução de ferramenta para o spinner de 78 colunas."""
     label = TOOL_LABELS.get(name, name)
@@ -936,6 +961,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
             session_tokens = 0
             current_model = get_session_model(session_id, agent)
             awaiting_model_menu = False
+            current_col = 10
 
             banner = (
                 f"\r\n{CLR_HEADER}"
@@ -965,7 +991,8 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                     if char in ("\r", "\n"):
                         if buffer.endswith("\\"):
                             buffer = buffer[:-1] + "\n"
-                            conn.sendall(encode_dos("\r\n..> "))
+                            current_col = 4
+                            conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}..>{CLR_USER} "))
                             continue
                         prompt = buffer.strip()
                         if prompt and not prompt.startswith("/"):
@@ -975,6 +1002,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                     command_history.pop(0)
                         history_idx = -1
                         buffer = ""
+                        current_col = 10
                         if not prompt:
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                             continue
@@ -1137,42 +1165,85 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                 elif history_idx > 0:
                                     history_idx -= 1
                                 if len(buffer) > 0:
-                                    conn.sendall(encode_dos("\x08 \x08" * len(buffer)))
+                                    conn.sendall(encode_dos(clear_input_buffer(buffer)))
                                 buffer = command_history[history_idx]
-                                conn.sendall(encode_dos(f"{CLR_USER}{buffer}"))
+                                conn.sendall(encode_dos(render_input_buffer(buffer)))
+                                lines = buffer.split("\n")
+                                current_col = (4 if len(lines) > 1 else 10) + len(lines[-1])
                             continue
                         elif char == "B":
                             if command_history and history_idx != -1:
                                 if len(buffer) > 0:
-                                    conn.sendall(encode_dos("\x08 \x08" * len(buffer)))
+                                    conn.sendall(encode_dos(clear_input_buffer(buffer)))
                                 if history_idx < len(command_history) - 1:
                                     history_idx += 1
                                     buffer = command_history[history_idx]
-                                    conn.sendall(encode_dos(f"{CLR_USER}{buffer}"))
+                                    conn.sendall(encode_dos(render_input_buffer(buffer)))
+                                    lines = buffer.split("\n")
+                                    current_col = (4 if len(lines) > 1 else 10) + len(lines[-1])
                                 else:
                                     history_idx = -1
                                     buffer = ""
+                                    current_col = 10
                             continue
 
                     elif char in ("\x08", "\x7f"):
                         if len(buffer) > 0:
-                            buffer = buffer[:-1]
-                            conn.sendall(b"\x08 \x08")
+                            last_char = buffer[-1]
+                            if last_char == "\n":
+                                buffer = buffer[:-1]
+                                lines = buffer.split("\n")
+                                prev_line = lines[-1]
+                                prev_col = (10 if len(lines) == 1 else 4) + len(prev_line)
+                                current_col = prev_col
+                                back_seq = f"\r\x1b[K\x1b[A\r" + (f"\x1b[{prev_col}C" if prev_col > 0 else "")
+                                conn.sendall(encode_dos(back_seq))
+                            else:
+                                buffer = buffer[:-1]
+                                current_col = max(0, current_col - 1)
+                                conn.sendall(b"\x08 \x08")
                     elif char == "\x0c":  # Ctrl+L (limpar tela inteira e reexibir prompt com buffer atual)
-                        conn.sendall(encode_dos(f"\x1b[2J\x1b[H{CLR_PROMPT}OpenClaw>{CLR_USER} {buffer}"))
+                        conn.sendall(encode_dos(f"\x1b[2J\x1b[H{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                        if buffer:
+                            conn.sendall(encode_dos(render_input_buffer(buffer)))
+                        lines = buffer.split("\n") if buffer else [""]
+                        current_col = (4 if len(lines) > 1 else 10) + len(lines[-1])
                     elif char == "\x15":  # Ctrl+U (limpar linha e reexibir prompt)
                         history_idx = -1
                         if len(buffer) > 0:
-                            back_str = "\x08 \x08" * len(buffer)
-                            conn.sendall(encode_dos(back_str))
+                            conn.sendall(encode_dos(clear_input_buffer(buffer)))
                             buffer = ""
+                            current_col = 10
                         else:
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                            current_col = 10
                     elif ord(char) < 32 and char not in ("\r", "\n"):
                         pass  # Ignora outros caracteres de controle
                     else:
-                        buffer += char
-                        conn.sendall(encode_dos(f"{CLR_USER}{char}"))
+                        is_cmd = buffer.startswith("/")
+                        if char == " " and current_col >= 72 and not is_cmd:
+                            buffer += "\n"
+                            current_col = 4
+                            conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}..>{CLR_USER} "))
+                        elif current_col >= 76 and char != " " and not is_cmd:
+                            cur_line = buffer.split("\n")[-1]
+                            m = re.search(r'(\S+)$', cur_line)
+                            if m and len(m.group(1)) < 55:
+                                word = m.group(1)
+                                erase_len = len(word)
+                                erase_seq = "\x08 \x08" * erase_len
+                                buffer = buffer[:-erase_len] + "\n" + word + char
+                                current_col = 4 + len(word) + 1
+                                out_seq = f"{erase_seq}\r\n{CLR_PROMPT}..>{CLR_USER} {word}{char}"
+                                conn.sendall(encode_dos(out_seq))
+                            else:
+                                buffer += "\n" + char
+                                current_col = 5
+                                conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}..>{CLR_USER} {char}"))
+                        else:
+                            buffer += char
+                            current_col += 1
+                            conn.sendall(encode_dos(f"{CLR_USER}{char}"))
 
         except (ConnectionResetError, BrokenPipeError):
             print(f"[!] Conexão com {addr} perdida abruptamente.")
