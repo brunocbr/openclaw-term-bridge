@@ -411,9 +411,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
     usage = {}
     spinner_active = True
     directive_filter = DirectiveFilter()
-    col_count = 0
-    MAX_COLS = 76
-    raw_accumulator = ""
+    word_wrapper = ANSIWordWrapper(max_cols=72)
 
     # Normaliza identificador do agente e chave de sessão
     agent_id = agent.split("/", 1)[1] if "/" in agent else agent
@@ -611,18 +609,16 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                     spinner.stop()
                     spinner_active = False
                     conn.sendall(encode_dos(CLR_AGENT))
-                raw_accumulator += safe_trailing
+                wrapped_trailing = word_wrapper.feed(safe_trailing)
+                if wrapped_trailing:
+                    conn.sendall(encode_dos(wrapped_trailing))
 
         if spinner_active:
             spinner.stop()
 
-        if raw_accumulator:
-            final_clean = re.sub(r'(\\033|\\x1b|\\e)', '\x1b', raw_accumulator)
-            for char in final_clean:
-                if char == "\n":
-                    conn.sendall(encode_dos("\r\n"))
-                else:
-                    conn.sendall(encode_dos(char))
+        flushed = word_wrapper.flush()
+        if flushed:
+            conn.sendall(encode_dos(flushed))
 
         conn.sendall(encode_dos(f"{CLR_RESET}\r\n"))
 
