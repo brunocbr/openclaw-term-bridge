@@ -995,7 +995,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}..>{CLR_USER} "))
                             continue
                         prompt = buffer.strip()
-                        if prompt and not prompt.startswith("/"):
+                        if prompt:
                             if not command_history or command_history[-1] != prompt:
                                 command_history.append(prompt)
                                 if len(command_history) > 50:
