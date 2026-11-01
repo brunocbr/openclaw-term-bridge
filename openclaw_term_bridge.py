@@ -2,7 +2,9 @@ import argparse
 import json
 import os
 import re
+import shutil
 import socket
+import subprocess
 import threading
 import time
 import uuid
@@ -253,6 +255,98 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
 
     return usage
 
+
+def handle_zmodem_download(conn: socket.socket, file_arg: str):
+    """Envia um arquivo para o TeleMate via ZMODEM (sz)."""
+    sz_bin = shutil.which("sz")
+    if not sz_bin:
+        conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: 'sz' (lrzsz) não encontrado. Instale com: brew install lrzsz]{CLR_RESET}\r\n"))
+        return
+
+    filepath = os.path.expanduser(file_arg.strip())
+    if not os.path.isfile(filepath):
+        conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: Arquivo não encontrado ou inválido: {filepath}]{CLR_RESET}\r\n"))
+        return
+
+    file_size = os.path.getsize(filepath)
+    file_name = os.path.basename(filepath)
+    conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Iniciando ZMODEM Download: {file_name} ({file_size} bytes)...]{CLR_RESET}\r\n"))
+    time.sleep(0.3)
+
+    # Drena eventuais resíduos no socket antes de passar o controle ao sz
+    conn.setblocking(False)
+    try:
+        while conn.recv(1024):
+            pass
+    except (BlockingIOError, socket.error):
+        pass
+    conn.setblocking(True)
+
+    try:
+        fd = conn.fileno()
+        # -b: binary (sem conversão de CR/LF)
+        # --zmodem: força protocolo Zmodem
+        proc = subprocess.run(
+            [sz_bin, "-b", "--zmodem", filepath],
+            stdin=fd,
+            stdout=fd,
+            stderr=subprocess.DEVNULL
+        )
+        if proc.returncode == 0:
+            msg = f"\r\n{CLR_AGENT}[ZMODEM: Download concluído com sucesso]{CLR_RESET}\r\n"
+        else:
+            msg = f"\r\n{CLR_ERROR}[ZMODEM: Transferência abortada ou erro ({proc.returncode})]{CLR_RESET}\r\n"
+    except Exception as e:
+        msg = f"\r\n{CLR_ERROR}[Erro na execução do Zmodem: {e}]{CLR_RESET}\r\n"
+
+    conn.sendall(encode_dos(msg))
+
+
+def handle_zmodem_upload(conn: socket.socket, target_dir_arg: str = ""):
+    """Recebe um arquivo vindo do TeleMate via ZMODEM (rz)."""
+    rz_bin = shutil.which("rz")
+    if not rz_bin:
+        conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: 'rz' (lrzsz) não encontrado. Instale com: brew install lrzsz]{CLR_RESET}\r\n"))
+        return
+
+    dest_dir = os.path.expanduser(target_dir_arg.strip()) if target_dir_arg else os.getcwd()
+    if not os.path.isdir(dest_dir):
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except Exception as e:
+            conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro ao criar pasta destino: {e}]{CLR_RESET}\r\n"))
+            return
+
+    conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Aguardando ZMODEM Upload em: {dest_dir}...]{CLR_RESET}\r\n"))
+    conn.sendall(encode_dos(f"{CLR_STATUS}[Dica: Pressione PgUp no TeleMate se o envio não iniciar sozinho]{CLR_RESET}\r\n"))
+    time.sleep(0.3)
+
+    conn.setblocking(False)
+    try:
+        while conn.recv(1024):
+            pass
+    except (BlockingIOError, socket.error):
+        pass
+    conn.setblocking(True)
+
+    try:
+        fd = conn.fileno()
+        proc = subprocess.run(
+            [rz_bin, "-b", "-y"],
+            cwd=dest_dir,
+            stdin=fd,
+            stdout=fd,
+            stderr=subprocess.DEVNULL
+        )
+        if proc.returncode == 0:
+            msg = f"\r\n{CLR_AGENT}[ZMODEM: Upload concluído com sucesso]{CLR_RESET}\r\n"
+        else:
+            msg = f"\r\n{CLR_ERROR}[ZMODEM: Transferência abortada ou erro ({proc.returncode})]{CLR_RESET}\r\n"
+    except Exception as e:
+        msg = f"\r\n{CLR_ERROR}[Erro na execução do Zmodem: {e}]{CLR_RESET}\r\n"
+
+    conn.sendall(encode_dos(msg))
+
 def start_bridge(port: int, agent: str, fixed_session_id: str = None):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -278,7 +372,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                 f"\r\n{CLR_HEADER}========================================\r\n"
                 f"    OPENCLAW LOCAL AGENT - TERMINAL     \r\n"
                 f"========================================{CLR_RESET}\r\n"
-                f"{CLR_STATUS}[Sessão: {session_id} | Comandos: /new [id], /reset, /session <id>]{CLR_RESET}\r\n\r\n"
+                f"{CLR_STATUS}[Sessão: {session_id} | /help para comandos | /sz <arq>, /rz [dir]]{CLR_RESET}\r\n\r\n"
                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
             )
             conn.sendall(encode_dos(banner))
@@ -314,6 +408,34 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
                             )
                             conn.sendall(encode_dos(reset_msg))
+                            continue
+
+                        if cmd in ("/download", "/sz"):
+                            if len(parts) > 1:
+                                handle_zmodem_download(conn, parts[1])
+                            else:
+                                conn.sendall(encode_dos(f"\r\n{CLR_ERROR}Uso: /sz <caminho_do_arquivo> ou /download <arquivo>{CLR_RESET}\r\n"))
+                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                            continue
+
+                        if cmd in ("/upload", "/rz"):
+                            target = parts[1] if len(parts) > 1 else ""
+                            handle_zmodem_upload(conn, target)
+                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                            continue
+
+                        if cmd in ("/help", "/?"):
+                            help_msg = (
+                                f"\r\n{CLR_HEADER}--- Comandos Disponíveis ---{CLR_RESET}\r\n"
+                                f"{CLR_STATUS}/new [id]{CLR_RESET}         - Inicia uma nova conversa\r\n"
+                                f"{CLR_STATUS}/session <id>{CLR_RESET}     - Conecta a uma sessão existente\r\n"
+                                f"{CLR_STATUS}/reset{CLR_RESET}            - Reinicia a sessão atual\r\n"
+                                f"{CLR_STATUS}/sz <arquivo>{CLR_RESET}     - Download via Zmodem para o TeleMate\r\n"
+                                f"{CLR_STATUS}/rz [pasta]{CLR_RESET}       - Upload via Zmodem do TeleMate para o host\r\n"
+                                f"{CLR_STATUS}/help, /?{CLR_RESET}         - Exibe esta ajuda\r\n"
+                            )
+                            conn.sendall(encode_dos(help_msg))
+                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                             continue
 
                         conn.sendall(encode_dos("\r\n"))
