@@ -295,13 +295,15 @@ class BBSPager:
         self.page_lines = page_lines
         self.lines_count = 0
         self.aborted = False
+        self.is_first_page = True
 
     def reset(self):
         self.lines_count = 0
         self.aborted = False
+        self.is_first_page = True
 
     def send(self, text: str, ws=None, session_key: str = None, target_run_id: str = None) -> bool:
-        """Envia texto contando quebras de linha e pausando ao atingir page_lines. Retorna False se abortado."""
+        """Envia texto contando quebras de linha e pausando ao atingir o limite da tela. Retorna False se abortado."""
         if not text or self.aborted:
             return not self.aborted
         if self.page_lines <= 0:
@@ -312,7 +314,9 @@ class BBSPager:
             self.conn.sendall(encode_dos(line))
             if "\n" in line:
                 self.lines_count += 1
-                if self.lines_count >= self.page_lines:
+                # Na primeira página, desconta a linha do prompt anterior e a linha do prompt -- Mais --
+                threshold = max(3, self.page_lines - 2) if self.is_first_page else max(3, self.page_lines - 1)
+                if self.lines_count >= threshold:
                     prompt = f"\r{CLR_STATUS}-- Mais -- [Espaco: continua | Q: sair]{CLR_RESET} "
                     self.conn.sendall(encode_dos(prompt))
                     
@@ -342,6 +346,7 @@ class BBSPager:
                     
                     # Espaço ou qualquer outra tecla prossegue para a próxima página
                     self.lines_count = 0
+                    self.is_first_page = False
 
         return True
 
