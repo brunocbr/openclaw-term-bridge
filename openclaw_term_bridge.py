@@ -547,6 +547,8 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                                                     usage["outputTokens"] = s.get("outputTokens", 0)
                                                 usage["totalTokens"] = s.get("totalTokens", 0)
                                                 usage["contextTokens"] = s.get("contextTokens", 0)
+                                                usage["model"] = s.get("model", "")
+                                                usage["modelProvider"] = s.get("modelProvider", "")
                                                 break
                                         break
                             except Exception:
@@ -851,6 +853,8 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                         p_tok = usage.get("prompt_tokens") or usage.get("inputTokens") or 0
                         c_tok = usage.get("completion_tokens") or usage.get("outputTokens") or 0
                         total_tok = usage.get("total_tokens") or usage.get("totalTokens") or 0
+                        model_name = usage.get("model") or ""
+                        model_tag = f"{CLR_HEADER}{model_name}{CLR_RESET} | " if model_name else ""
 
                         if p_tok > 0:
                             p_net = max(0, p_tok - cached_tok)
@@ -859,11 +863,13 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                             t_display = f"{round(context_tokens/1024)}k" if context_tokens >= 1024 else str(context_tokens)
                             if cached_tok > 0:
                                 cache_ratio = (cached_tok / p_tok * 100)
-                                tok_info = f"\r\n{CLR_RESET}[P:{p_display} C:{cache_ratio:.0f}% R:{c_tok} | T:{t_display} tok]{CLR_RESET}\r\n"
+                                tok_info = f"\r\n{CLR_RESET}[{model_tag}P:{p_display} C:{cache_ratio:.0f}% R:{c_tok} | T:{t_display} tok]{CLR_RESET}\r\n"
                             else:
-                                tok_info = f"\r\n{CLR_RESET}[P:{p_display} R:{c_tok} | T:{t_display} tok]{CLR_RESET}\r\n"
+                                tok_info = f"\r\n{CLR_RESET}[{model_tag}P:{p_display} R:{c_tok} | T:{t_display} tok]{CLR_RESET}\r\n"
                         elif c_tok > 0:
-                            tok_info = f"\r\n{CLR_RESET}[R:{c_tok} tok]{CLR_RESET}\r\n"
+                            tok_info = f"\r\n{CLR_RESET}[{model_tag}R:{c_tok} tok]{CLR_RESET}\r\n"
+                        elif model_name:
+                            tok_info = f"\r\n{CLR_RESET}[{CLR_HEADER}{model_name}{CLR_RESET}]{CLR_RESET}\r\n"
                         else:
                             tok_info = ""
 
