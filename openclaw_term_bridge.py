@@ -454,13 +454,13 @@ def encode_dos(text: str) -> bytes:
 
 
 class BBSSpinner:
-    """Spinner clássico de BBS com mensagem dinâmica em tempo real via TCP sem buffer."""
+    """Barra de status dinâmica de BBS em linha única com ou sem animação giratória."""
     FRAMES = ["|", "/", "-", "\\"]
 
     def __init__(self, conn: socket.socket, message: str = "Conectando...", enabled: bool = True):
         self.conn = conn
         self.message = message
-        self.enabled = enabled
+        self.enabled = enabled  # True = com animação giratória; False = linha única dinâmica sem rotação contínua
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._spin, daemon=True)
         self.lock = threading.Lock()
@@ -472,44 +472,46 @@ class BBSSpinner:
             return msg[:max_chars - 3] + "..."
         return msg
 
+    def _format_tag(self, safe_msg: str, frame: str = "") -> str:
+        if self.enabled and frame:
+            return f"[{safe_msg} {frame}]"
+        return f"[{safe_msg}]"
+
     def start(self):
-        if not self.enabled:
-            return
         with self.lock:
             safe_msg = self._truncate(self.message)
-            first_frame = f"\r{CLR_STATUS}[{safe_msg} {self.FRAMES[0]}]{CLR_RESET}"
-            self.last_render_len = len(safe_msg) + 5
+            tag = self._format_tag(safe_msg, self.FRAMES[0])
+            first_frame = f"\r{CLR_STATUS}{tag}{CLR_RESET}"
+            self.last_render_len = len(tag)
             try:
                 self.conn.sendall(encode_dos(first_frame))
             except Exception:
                 pass
-        self.thread.start()
+        if self.enabled:
+            self.thread.start()
 
     def update_message(self, new_message: str):
-        """Atualiza a mensagem exibida no spinner imediatamente."""
-        if not self.enabled:
-            return
+        """Atualiza dinamicamente a MESMA linha via \r (nunca pula linha)."""
         with self.lock:
             if self.stop_event.is_set():
                 return
             self.message = new_message
             safe_msg = self._truncate(self.message)
-            frame = self.FRAMES[0]
-            current_len = len(safe_msg) + 5
+            tag = self._format_tag(safe_msg, self.FRAMES[0])
+            current_len = len(tag)
             padding = " " * max(0, self.last_render_len - current_len)
             self.last_render_len = max(self.last_render_len, current_len)
-            text = f"\r{CLR_STATUS}[{safe_msg} {frame}]{CLR_RESET}{padding}"
+            text = f"\r{CLR_STATUS}{tag}{CLR_RESET}{padding}"
             try:
                 self.conn.sendall(encode_dos(text))
             except Exception:
                 pass
 
     def stop(self):
-        if not self.enabled:
-            return
+        """Limpa a linha de status com espaços e devolve o cursor ao início via \r."""
         if not self.stop_event.is_set():
             self.stop_event.set()
-            if self.thread.is_alive():
+            if self.enabled and self.thread.is_alive():
                 self.thread.join(timeout=0.5)
             with self.lock:
                 clear_len = max(self.last_render_len, len(self.message) + 8) + 8
@@ -519,26 +521,24 @@ class BBSSpinner:
                     pass
 
     def _spin(self):
-        if not self.enabled:
-            return
         idx = 1
         while not self.stop_event.is_set():
             self.stop_event.wait(0.12)
             if self.stop_event.is_set():
                 break
             with self.lock:
-                safe_msg = self._truncate(self.message)
                 frame = self.FRAMES[idx % len(self.FRAMES)]
-                current_len = len(safe_msg) + 5
+                idx += 1
+                safe_msg = self._truncate(self.message)
+                tag = self._format_tag(safe_msg, frame)
+                current_len = len(tag)
                 padding = " " * max(0, self.last_render_len - current_len)
                 self.last_render_len = max(self.last_render_len, current_len)
-                text = f"\r{CLR_STATUS}[{safe_msg} {frame}]{CLR_RESET}{padding}"
+                text = f"\r{CLR_STATUS}{tag}{CLR_RESET}{padding}"
                 try:
                     self.conn.sendall(encode_dos(text))
                 except Exception:
                     break
-            idx += 1
-
 
 def generate_session_id() -> str:
     return f"term-{uuid.uuid4().hex[:8]}"
@@ -1276,7 +1276,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_li
                                     f"{CLR_STATUS}/reset{CLR_RESET}            - Reinicia a sessão atual\r\n"
                                     f"{CLR_STATUS}/model [num|nome]{CLR_RESET} - Menu BBS de seleção ou troca de modelo\r\n"
                                     f"{CLR_STATUS}/lines [n]{CLR_RESET}        - Linhas por tela para paginação (default: 48, 0=off)\r\n"
-                                    f"{CLR_STATUS}/spinner [on|off]{CLR_RESET}  - Ativa/desativa barra giratória (preserva scrollback)\r\n"
+                                    f"{CLR_STATUS}/spinner [on|off]{CLR_RESET}  - Ativa/desativa animação giratória (mantém status na mesma linha)\r\n"
                                     f"{CLR_STATUS}/sz <arquivo>{CLR_RESET}     - Download via Zmodem para o TeleMate\r\n"
                                     f"{CLR_STATUS}/rz [pasta]{CLR_RESET}       - Upload via Zmodem do TeleMate para o host\r\n"
                                     f"{CLR_STATUS}/help, /?{CLR_RESET}         - Exibe esta ajuda\r\n"
