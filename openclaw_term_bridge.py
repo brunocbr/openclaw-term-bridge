@@ -1107,9 +1107,8 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_li
                 f"      \___/| .__/ \___|_| |_|\____|_|\__,_| \_/\_/\r\n"
                 f"           |_| {CLR_PROMPT}PORT: {port}{CLR_HEADER}    {CLR_AGENT}AGENTE: {agent}{CLR_RESET}\r\n"
                 f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}\r\n"
-                f"{CLR_STATUS}    [Sessão: {session_id} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
-                f"{CLR_STATUS}    [Paginação: {page_lines} linhas | Spinner: {'ON' if spinner_enabled else 'OFF'}]{CLR_RESET}\r\n"
-                f"{CLR_STATUS}    [Comandos: /help | /lines | /spinner | /model | /sz | /rz]{CLR_RESET}\r\n"
+                f"{CLR_STATUS}    [Sessão: {CLR_HEADER}{session_id}{CLR_STATUS} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
+                f"{CLR_STATUS}    [Comandos: /help | /model | /session | /new | /lines {CLR_HEADER}{page_lines}{CLR_STATUS}]{CLR_RESET}\r\n"
                 f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}\r\n\r\n"
                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
             )
