@@ -1033,10 +1033,17 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
 
                         conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
 
-                    elif char == "\x08":
+                    elif char in ("\x08", "\x7f"):
                         if len(buffer) > 0:
                             buffer = buffer[:-1]
                             conn.sendall(b"\x08 \x08")
+                    elif char == "\x15":  # Ctrl+U (limpar linha)
+                        if len(buffer) > 0:
+                            back_str = "\x08 \x08" * len(buffer)
+                            conn.sendall(encode_dos(back_str))
+                            buffer = ""
+                    elif ord(char) < 32 and char not in ("\r", "\n"):
+                        pass  # Ignora outros caracteres de controle
                     else:
                         buffer += char
                         conn.sendall(encode_dos(f"{CLR_USER}{char}"))
