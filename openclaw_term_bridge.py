@@ -888,6 +888,10 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                 text = data.decode("cp850", errors="ignore")
                 for char in text:
                     if char in ("\r", "\n"):
+                        if buffer.endswith("\\"):
+                            buffer = buffer[:-1] + "\n"
+                            conn.sendall(encode_dos("\r\n..> "))
+                            continue
                         prompt = buffer.strip()
                         buffer = ""
                         if not prompt:
