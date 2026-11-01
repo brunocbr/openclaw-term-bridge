@@ -811,6 +811,34 @@ def patch_session_model(session_id: str, new_model: str, agent: str) -> tuple[bo
         return False, str(e)
 
 
+POPULAR_MODELS = [
+    ("1", "gemini-3.8-flash", "google/gemini-3.8-flash", "Google (Padrão, Rápido)"),
+    ("2", "claude-sonnet-5-5", "anthropic/claude-sonnet-5-5", "Anthropic (Poderoso, Preciso)"),
+    ("3", "claude-opus-5-5", "anthropic/claude-opus-5-5", "Anthropic (Raciocínio Máximo)"),
+    ("4", "gpt-5.6-terra", "openai/gpt-5.6-terra", "OpenAI (Fallback geral)"),
+    ("5", "gemini-3.5-flash-lite", "google/gemini-3.5-flash-lite", "Google (Ultra-leve)"),
+]
+
+
+def render_model_menu(current_model: str) -> str:
+    """Renderiza o menu clássico de seleção de modelos em estilo BBS ANSI."""
+    lines = [
+        f"\r\n{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}",
+        f"{CLR_HEADER}|             SELECAO DE MODELOS - OPENCLAW BBS                |{CLR_RESET}",
+        f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}",
+    ]
+    for key, name, full_id, desc in POPULAR_MODELS:
+        is_cur = (name in current_model or full_id in current_model)
+        marker = f"{CLR_AGENT}*" if is_cur else " "
+        cur_tag = f" {CLR_AGENT}[ATIVO]{CLR_RESET}" if is_cur else ""
+        lines.append(f"{marker} {CLR_STATUS}[{key}]{CLR_RESET} {CLR_USER}{name:<22}{CLR_RESET} {CLR_HEADER}{desc}{CLR_RESET}{cur_tag}")
+    lines.extend([
+        f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}",
+        f"{CLR_STATUS}Digite o número [1-5] ou use: /model <nome_do_modelo>{CLR_RESET}\r\n"
+    ])
+    return "\r\n".join(lines)
+
+
 def start_bridge(port: int, agent: str, fixed_session_id: str = None):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -859,69 +887,76 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                             continue
 
-                        parts = prompt.split(maxsplit=1)
-                        cmd = parts[0].lower()
+                        if prompt.startswith("/"):
+                            parts = prompt.split(maxsplit=1)
+                            cmd = parts[0].lower()
 
-                        if cmd in ("/reset", "/new", "/session"):
-                            if len(parts) > 1:
-                                session_id = parts[1].strip()
-                            else:
-                                session_id = fixed_session_id or generate_session_id()
-
-                            session_tokens = 0
-                            current_model = get_session_model(session_id, agent)
-                            reset_msg = (
-                                f"\r\n{CLR_STATUS}[Sessão ativa: {session_id} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
-                                f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
-                            )
-                            conn.sendall(encode_dos(reset_msg))
-                            continue
-
-                        if cmd == "/model":
-                            if len(parts) > 1 and parts[1].strip():
-                                target_model = parts[1].strip()
-                                conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Alterando modelo para: {target_model}...]{CLR_RESET}"))
-                                ok, res = patch_session_model(session_id, target_model, agent)
-                                if ok:
-                                    current_model = res
-                                    msg = f"\r\n{CLR_AGENT}[Modelo alterado com sucesso: {CLR_HEADER}{current_model}{CLR_AGENT}]{CLR_RESET}\r\n"
+                            if cmd in ("/reset", "/new", "/session"):
+                                if len(parts) > 1:
+                                    session_id = parts[1].strip()
                                 else:
-                                    msg = f"\r\n{CLR_ERROR}[Erro ao alterar modelo: {res}]{CLR_RESET}\r\n"
-                            else:
+                                    session_id = fixed_session_id or generate_session_id()
+
+                                session_tokens = 0
                                 current_model = get_session_model(session_id, agent)
-                                msg = f"\r\n{CLR_STATUS}[Modelo ativo da sessão: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
-                            conn.sendall(encode_dos(msg))
-                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
-                            continue
+                                reset_msg = (
+                                    f"\r\n{CLR_STATUS}[Sessão ativa: {session_id} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
+                                    f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
+                                )
+                                conn.sendall(encode_dos(reset_msg))
+                                continue
 
-                        if cmd in ("/download", "/sz"):
-                            if len(parts) > 1:
-                                handle_zmodem_download(conn, parts[1])
-                            else:
-                                conn.sendall(encode_dos(f"\r\n{CLR_ERROR}Uso: /sz <caminho_do_arquivo> ou /download <arquivo>{CLR_RESET}\r\n"))
-                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
-                            continue
+                            if cmd == "/model":
+                                current_model = get_session_model(session_id, agent)
+                                if len(parts) > 1 and parts[1].strip():
+                                    target_arg = parts[1].strip()
+                                    target_model = target_arg
+                                    for key, name, full_id, _ in POPULAR_MODELS:
+                                        if target_arg == key:
+                                            target_model = full_id
+                                            break
+                                    conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Alterando modelo para: {target_model}...]{CLR_RESET}"))
+                                    ok, res = patch_session_model(session_id, target_model, agent)
+                                    if ok:
+                                        current_model = res
+                                        msg = f"\r\n{CLR_AGENT}[Modelo alterado com sucesso: {CLR_HEADER}{current_model}{CLR_AGENT}]{CLR_RESET}\r\n"
+                                    else:
+                                        msg = f"\r\n{CLR_ERROR}[Erro ao alterar modelo: {res}]{CLR_RESET}\r\n"
+                                    conn.sendall(encode_dos(msg))
+                                else:
+                                    menu_text = render_model_menu(current_model)
+                                    conn.sendall(encode_dos(menu_text))
+                                conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                                continue
 
-                        if cmd in ("/upload", "/rz"):
-                            target = parts[1] if len(parts) > 1 else ""
-                            handle_zmodem_upload(conn, target)
-                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
-                            continue
+                            if cmd in ("/download", "/sz"):
+                                if len(parts) > 1:
+                                    handle_zmodem_download(conn, parts[1])
+                                else:
+                                    conn.sendall(encode_dos(f"\r\n{CLR_ERROR}Uso: /sz <caminho_do_arquivo> ou /download <arquivo>{CLR_RESET}\r\n"))
+                                conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                                continue
 
-                        if cmd in ("/help", "/?"):
-                            help_msg = (
-                                f"\r\n{CLR_HEADER}--- Comandos Disponíveis ---{CLR_RESET}\r\n"
-                                f"{CLR_STATUS}/new [id]{CLR_RESET}         - Inicia uma nova conversa\r\n"
-                                f"{CLR_STATUS}/session <id>{CLR_RESET}     - Conecta a uma sessão existente\r\n"
-                                f"{CLR_STATUS}/reset{CLR_RESET}            - Reinicia a sessão atual\r\n"
-                                f"{CLR_STATUS}/model [nome]{CLR_RESET}      - Exibe ou altera o modelo da sessão ativa\r\n"
-                                f"{CLR_STATUS}/sz <arquivo>{CLR_RESET}     - Download via Zmodem para o TeleMate\r\n"
-                                f"{CLR_STATUS}/rz [pasta]{CLR_RESET}       - Upload via Zmodem do TeleMate para o host\r\n"
-                                f"{CLR_STATUS}/help, /?{CLR_RESET}         - Exibe esta ajuda\r\n"
-                            )
-                            conn.sendall(encode_dos(help_msg))
-                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
-                            continue
+                            if cmd in ("/upload", "/rz"):
+                                target = parts[1] if len(parts) > 1 else ""
+                                handle_zmodem_upload(conn, target)
+                                conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                                continue
+
+                            if cmd in ("/help", "/?"):
+                                help_msg = (
+                                    f"\r\n{CLR_HEADER}--- Comandos Disponíveis ---{CLR_RESET}\r\n"
+                                    f"{CLR_STATUS}/new [id]{CLR_RESET}         - Inicia uma nova conversa\r\n"
+                                    f"{CLR_STATUS}/session <id>{CLR_RESET}     - Conecta a uma sessão existente\r\n"
+                                    f"{CLR_STATUS}/reset{CLR_RESET}            - Reinicia a sessão atual\r\n"
+                                    f"{CLR_STATUS}/model [num|nome]{CLR_RESET} - Menu BBS de seleção ou troca de modelo\r\n"
+                                    f"{CLR_STATUS}/sz <arquivo>{CLR_RESET}     - Download via Zmodem para o TeleMate\r\n"
+                                    f"{CLR_STATUS}/rz [pasta]{CLR_RESET}       - Upload via Zmodem do TeleMate para o host\r\n"
+                                    f"{CLR_STATUS}/help, /?{CLR_RESET}         - Exibe esta ajuda\r\n"
+                                )
+                                conn.sendall(encode_dos(help_msg))
+                                conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                                continue
 
                         conn.sendall(encode_dos("\r\n"))
                         spinner = BBSSpinner(conn, message="Conectando...")
