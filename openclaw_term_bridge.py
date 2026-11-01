@@ -168,7 +168,7 @@ class DirectiveFilter:
                 raw = stripped[len(p):].strip()
                 if p == "[[DOWNLOAD:" and raw.endswith("]]"):
                     raw = raw[:-2].strip()
-                return raw.strip('"\'')
+                return unicodedata.normalize("NFC", raw.strip('"\''))
         return ""
 
     def feed(self, text: str) -> str:
@@ -218,6 +218,8 @@ class DirectiveFilter:
 
 
 def sanitize_text(text: str) -> str:
+    # Normaliza primeiro para NFC para compor acentos (ex: a + acento -> á) antes de checar CP850
+    text = unicodedata.normalize("NFC", text)
     unsupported_map = {
         '“': '"', '”': '"', '‘': "'", '’': "'", '—': '-', '–': '-', '…': '...', '•': '*',
     }
@@ -463,15 +465,17 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                         if state == "delta":
                             content = payload.get("deltaText", "")
                             if content:
-                                safe_content = directive_filter.feed(sanitize_text(content))
-                                if safe_content:
-                                    # Desliga o spinner no primeiro caractere renderizável
-                                    if spinner_active:
-                                        spinner.stop()
-                                        spinner_active = False
-                                        conn.sendall(encode_dos(CLR_AGENT))
+                                filtered_content = directive_filter.feed(content)
+                                if filtered_content:
+                                    safe_content = sanitize_text(filtered_content)
+                                    if safe_content:
+                                        # Desliga o spinner no primeiro caractere renderizável
+                                        if spinner_active:
+                                            spinner.stop()
+                                            spinner_active = False
+                                            conn.sendall(encode_dos(CLR_AGENT))
 
-                                    raw_accumulator += safe_content
+                                        raw_accumulator += safe_content
 
                                     while True:
                                         match = ANSI_CAPTURE.search(raw_accumulator)
@@ -534,11 +538,13 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
 
         trailing_directive_text = directive_filter.finish()
         if trailing_directive_text:
-            if spinner_active:
-                spinner.stop()
-                spinner_active = False
-                conn.sendall(encode_dos(CLR_AGENT))
-            raw_accumulator += trailing_directive_text
+            safe_trailing = sanitize_text(trailing_directive_text)
+            if safe_trailing:
+                if spinner_active:
+                    spinner.stop()
+                    spinner_active = False
+                    conn.sendall(encode_dos(CLR_AGENT))
+                raw_accumulator += safe_trailing
 
         if spinner_active:
             spinner.stop()
@@ -569,10 +575,16 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
         conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: 'sz' (lrzsz) não encontrado. Instale com: brew install lrzsz]{CLR_RESET}\r\n"))
         return
 
-    filepath = os.path.expanduser(file_arg.strip().strip('"\''))
+    cleaned_arg = unicodedata.normalize("NFC", file_arg.strip().strip('"\''))
+    filepath = os.path.expanduser(cleaned_arg)
     if not os.path.isfile(filepath):
-        conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: Arquivo não encontrado ou inválido: {filepath}]{CLR_RESET}\r\n"))
-        return
+        # Tenta também forma decomposta NFD (comum em sistemas de arquivos macOS)
+        nfd_path = unicodedata.normalize("NFD", filepath)
+        if os.path.isfile(nfd_path):
+            filepath = nfd_path
+        else:
+            conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: Arquivo não encontrado ou inválido: {filepath}]{CLR_RESET}\r\n"))
+            return
 
     dos_filename = to_dos_83_filename(os.path.basename(filepath))
     temp_dir = tempfile.mkdtemp(prefix="telemate_dl_")
