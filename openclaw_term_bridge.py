@@ -288,6 +288,77 @@ class ANSIWordWrapper:
         return "".join(out)
 
 
+class BBSPager:
+    """Controlador de paginação de tela clássico de BBS (estilo 'Mais / More')."""
+    def __init__(self, conn: socket.socket, page_lines: int = 48):
+        self.conn = conn
+        self.page_lines = page_lines
+        self.lines_count = 0
+        self.aborted = False
+
+    def reset(self):
+        self.lines_count = 0
+        self.aborted = False
+
+    def send(self, text: str, ws=None, session_key: str = None, target_run_id: str = None) -> bool:
+        """Envia texto contando quebras de linha e pausando ao atingir page_lines. Retorna False se abortado."""
+        if not text or self.aborted:
+            return not self.aborted
+        if self.page_lines <= 0:
+            self.conn.sendall(encode_dos(text))
+            return True
+
+        for line in text.splitlines(keepends=True):
+            self.conn.sendall(encode_dos(line))
+            if "\n" in line:
+                self.lines_count += 1
+                if self.lines_count >= self.page_lines:
+                    prompt = f"\r{CLR_STATUS}-- Mais -- [Espaco: continua | Q: sair]{CLR_RESET} "
+                    self.conn.sendall(encode_dos(prompt))
+                    
+                    user_key = self._wait_key()
+                    # Limpa a linha do prompt de forma suave
+                    clear_prompt = "\r" + (" " * 55) + "\r"
+                    self.conn.sendall(encode_dos(clear_prompt))
+                    
+                    if user_key in (b"q", b"Q", b"\x03", b"\x1b"):  # Q, Ctrl+C ou ESC
+                        self.aborted = True
+                        self.conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Rolagem cancelada pelo usuário]{CLR_RESET}\r\n"))
+                        if ws and session_key:
+                            abort_payload = {"sessionKey": session_key}
+                            if target_run_id:
+                                abort_payload["runId"] = target_run_id
+                            abort_req = {
+                                "type": "req",
+                                "id": str(uuid.uuid4()),
+                                "method": "chat.abort",
+                                "params": abort_payload
+                            }
+                            try:
+                                ws.send(json.dumps(abort_req))
+                            except Exception:
+                                pass
+                        return False
+                    
+                    # Espaço ou qualquer outra tecla prossegue para a próxima página
+                    self.lines_count = 0
+
+        return True
+
+    def _wait_key(self) -> bytes:
+        try:
+            ch = self.conn.recv(1)
+            if not ch:
+                return b"q"
+            if ch == b"\r":
+                r, _, _ = select.select([self.conn], [], [], 0.05)
+                if r:
+                    self.conn.recv(1)
+            return ch
+        except Exception:
+            return b"q"
+
+
 class DirectiveFilter:
     """Filtra diretivas de download em tempo real durante o streaming.
     Linhas iniciadas por DOWNLOAD:<path> ou MEDIA:<path> são suprimidas da tela
@@ -381,9 +452,10 @@ class BBSSpinner:
     """Spinner clássico de BBS com mensagem dinâmica em tempo real via TCP sem buffer."""
     FRAMES = ["|", "/", "-", "\\"]
 
-    def __init__(self, conn: socket.socket, message: str = "Conectando..."):
+    def __init__(self, conn: socket.socket, message: str = "Conectando...", enabled: bool = True):
         self.conn = conn
         self.message = message
+        self.enabled = enabled
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._spin, daemon=True)
         self.lock = threading.Lock()
@@ -396,6 +468,8 @@ class BBSSpinner:
         return msg
 
     def start(self):
+        if not self.enabled:
+            return
         with self.lock:
             safe_msg = self._truncate(self.message)
             first_frame = f"\r{CLR_STATUS}[{safe_msg} {self.FRAMES[0]}]{CLR_RESET}"
@@ -408,6 +482,8 @@ class BBSSpinner:
 
     def update_message(self, new_message: str):
         """Atualiza a mensagem exibida no spinner imediatamente."""
+        if not self.enabled:
+            return
         with self.lock:
             if self.stop_event.is_set():
                 return
@@ -424,6 +500,8 @@ class BBSSpinner:
                 pass
 
     def stop(self):
+        if not self.enabled:
+            return
         if not self.stop_event.is_set():
             self.stop_event.set()
             if self.thread.is_alive():
@@ -436,6 +514,8 @@ class BBSSpinner:
                     pass
 
     def _spin(self):
+        if not self.enabled:
+            return
         idx = 1
         while not self.stop_event.is_set():
             self.stop_event.wait(0.12)
@@ -459,10 +539,12 @@ def generate_session_id() -> str:
     return f"term-{uuid.uuid4().hex[:8]}"
 
 
-def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str, spinner: BBSSpinner):
+def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str, spinner: BBSSpinner, pager: BBSPager = None):
     """Executa prompt via WebSocket nativo do Gateway OpenClaw com eventos e streaming."""
     usage = {}
     spinner_active = True
+    if pager is None:
+        pager = BBSPager(conn, page_lines=0)
     directive_filter = DirectiveFilter()
     word_wrapper = ANSIWordWrapper(max_cols=72)
 
@@ -654,7 +736,9 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
 
                                         wrapped_text = word_wrapper.feed(safe_content)
                                         if wrapped_text:
-                                            conn.sendall(encode_dos(wrapped_text))
+                                            if not pager.send(wrapped_text, ws=ws, session_key=session_key, target_run_id=target_run_id):
+                                                usage["aborted"] = True
+                                                break
 
                         elif state == "final":
                             # Consulta dados consolidados da sessão no Gateway (input, output, total de contexto)
@@ -707,14 +791,18 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                     conn.sendall(encode_dos(CLR_AGENT))
                 wrapped_trailing = word_wrapper.feed(safe_trailing)
                 if wrapped_trailing:
-                    conn.sendall(encode_dos(wrapped_trailing))
+                    if not pager.send(wrapped_trailing, ws=ws, session_key=session_key, target_run_id=target_run_id):
+                        usage["aborted"] = True
+                        return usage, []
 
         if spinner_active:
             spinner.stop()
 
         flushed = word_wrapper.flush()
         if flushed:
-            conn.sendall(encode_dos(flushed))
+            if not pager.send(flushed, ws=ws, session_key=session_key, target_run_id=target_run_id):
+                usage["aborted"] = True
+                return usage, []
 
         conn.sendall(encode_dos(f"{CLR_RESET}\r\n"))
 
@@ -980,7 +1068,7 @@ def render_model_menu(current_model: str) -> str:
     return "\r\n".join(lines)
 
 
-def start_bridge(port: int, agent: str, fixed_session_id: str = None):
+def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_lines: int = 48, default_spinner: bool = True):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, port))
@@ -1006,6 +1094,9 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
             current_model = get_session_model(session_id, agent)
             awaiting_model_menu = False
             current_col = 10
+            spinner_enabled = default_spinner
+            page_lines = default_lines
+            pager = BBSPager(conn, page_lines=page_lines)
 
             banner = (
                 f"\r\n{CLR_HEADER}"
@@ -1017,7 +1108,8 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                 f"           |_| {CLR_PROMPT}PORT: {port}{CLR_HEADER}    {CLR_AGENT}AGENTE: {agent}{CLR_RESET}\r\n"
                 f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}\r\n"
                 f"{CLR_STATUS}    [Sessão: {session_id} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
-                f"{CLR_STATUS}    [Comandos: /help | /model | /sz <arq> | /rz [dir]]{CLR_RESET}\r\n"
+                f"{CLR_STATUS}    [Paginação: {page_lines} linhas | Spinner: {'ON' if spinner_enabled else 'OFF'}]{CLR_RESET}\r\n"
+                f"{CLR_STATUS}    [Comandos: /help | /lines | /spinner | /model | /sz | /rz]{CLR_RESET}\r\n"
                 f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}\r\n\r\n"
                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
             )
@@ -1128,6 +1220,50 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                 conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                                 continue
 
+                            if cmd in ("/spinner", "/spin"):
+                                if len(parts) > 1:
+                                    arg = parts[1].strip().lower()
+                                    if arg in ("off", "0", "nao", "não", "desativar", "false"):
+                                        spinner_enabled = False
+                                        msg = f"\r\n{CLR_STATUS}[Spinner desativado (preservando log back do TeleMate)]{CLR_RESET}\r\n"
+                                    elif arg in ("on", "1", "sim", "ativar", "true"):
+                                        spinner_enabled = True
+                                        msg = f"\r\n{CLR_STATUS}[Spinner ativado]{CLR_RESET}\r\n"
+                                    else:
+                                        msg = f"\r\n{CLR_ERROR}Uso: /spinner on | /spinner off{CLR_RESET}\r\n"
+                                else:
+                                    spinner_enabled = not spinner_enabled
+                                    st = "ativado" if spinner_enabled else "desativado"
+                                    msg = f"\r\n{CLR_STATUS}[Spinner {st}]{CLR_RESET}\r\n"
+                                conn.sendall(encode_dos(msg))
+                                conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                                continue
+
+                            if cmd in ("/lines", "/page", "/rows"):
+                                if len(parts) > 1:
+                                    arg = parts[1].strip().lower()
+                                    if arg in ("off", "0", "desativar", "none", "false"):
+                                        page_lines = 0
+                                        pager.page_lines = 0
+                                        msg = f"\r\n{CLR_STATUS}[Paginação desativada (rolagem contínua)]{CLR_RESET}\r\n"
+                                    else:
+                                        try:
+                                            nl = int(arg)
+                                            if nl < 5 and nl != 0:
+                                                msg = f"\r\n{CLR_ERROR}Número mínimo de linhas para paginação é 5{CLR_RESET}\r\n"
+                                            else:
+                                                page_lines = nl
+                                                pager.page_lines = nl
+                                                msg = f"\r\n{CLR_STATUS}[Paginação configurada para {page_lines} linhas]{CLR_RESET}\r\n"
+                                        except ValueError:
+                                            msg = f"\r\n{CLR_ERROR}Uso: /lines <número> (ex: /lines 48 ou /lines 0 para desativar){CLR_RESET}\r\n"
+                                else:
+                                    st = f"{page_lines} linhas" if page_lines > 0 else "desativada"
+                                    msg = f"\r\n{CLR_STATUS}[Paginação atual: {st} (use /lines <n> para alterar)]{CLR_RESET}\r\n"
+                                conn.sendall(encode_dos(msg))
+                                conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                                continue
+
                             if cmd in ("/help", "/?"):
                                 help_msg = (
                                     f"\r\n{CLR_HEADER}--- Comandos Disponíveis ---{CLR_RESET}\r\n"
@@ -1135,6 +1271,8 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                     f"{CLR_STATUS}/session <id>{CLR_RESET}     - Conecta a uma sessão existente\r\n"
                                     f"{CLR_STATUS}/reset{CLR_RESET}            - Reinicia a sessão atual\r\n"
                                     f"{CLR_STATUS}/model [num|nome]{CLR_RESET} - Menu BBS de seleção ou troca de modelo\r\n"
+                                    f"{CLR_STATUS}/lines [n]{CLR_RESET}        - Linhas por tela para paginação (default: 48, 0=off)\r\n"
+                                    f"{CLR_STATUS}/spinner [on|off]{CLR_RESET}  - Ativa/desativa barra giratória (preserva scrollback)\r\n"
                                     f"{CLR_STATUS}/sz <arquivo>{CLR_RESET}     - Download via Zmodem para o TeleMate\r\n"
                                     f"{CLR_STATUS}/rz [pasta]{CLR_RESET}       - Upload via Zmodem do TeleMate para o host\r\n"
                                     f"{CLR_STATUS}/help, /?{CLR_RESET}         - Exibe esta ajuda\r\n"
@@ -1144,10 +1282,12 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                 continue
 
                         conn.sendall(encode_dos("\r\n"))
-                        spinner = BBSSpinner(conn, message="Conectando...")
+                        spinner = BBSSpinner(conn, message="Conectando...", enabled=spinner_enabled)
                         spinner.start()
+                        pager.reset()
+                        pager.page_lines = page_lines
                         
-                        usage, downloads = stream_openclaw(prompt, conn, agent, session_id, spinner)
+                        usage, downloads = stream_openclaw(prompt, conn, agent, session_id, spinner, pager=pager)
 
                         if usage.get("aborted"):
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
@@ -1324,11 +1464,13 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--port", type=int, default=env_port, help=f"Porta do servidor socket (padrão: {env_port})")
     parser.add_argument("-a", "--agent", type=str, default=env_agent, help=f"Modelo do agente OpenClaw (padrão: {env_agent})")
     parser.add_argument("-s", "--session", type=str, default=env_session, help="ID de sessão fixo para retomar conversas anteriores")
+    parser.add_argument("--lines", type=int, default=48, help="Número de linhas por tela para paginação (padrão: 48, 0 para desativar)")
+    parser.add_argument("--no-spinner", action="store_true", help="Desativa o spinner por padrão")
 
     args = parser.parse_args()
 
     try:
-        start_bridge(port=args.port, agent=args.agent, fixed_session_id=args.session)
+        start_bridge(port=args.port, agent=args.agent, fixed_session_id=args.session, default_lines=args.lines, default_spinner=not args.no_spinner)
     except KeyboardInterrupt:
         print("\n[*] Bridge encerrada.")
     except Exception as e:
