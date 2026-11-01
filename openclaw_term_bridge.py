@@ -1,4 +1,5 @@
 import argparse
+import select
 import json
 import os
 import re
@@ -537,9 +538,49 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
             ws.send(json.dumps(send_req))
 
             target_run_id = None
+            aborted_by_user = False
 
             while True:
-                msg_raw = ws.recv()
+                # 1. Verifica se o usuário pressionou CTRL+C (0x03) no TeleMate
+                try:
+                    r_list, _, _ = select.select([conn], [], [], 0)
+                    if r_list:
+                        user_in = conn.recv(1024)
+                        if not user_in:
+                            break
+                        if b"\x03" in user_in:
+                            aborted_by_user = True
+                            if spinner_active:
+                                spinner.stop()
+                                spinner_active = False
+                            conn.sendall(encode_dos(f"\r\n{CLR_ERROR}^C [Processamento abortado pelo usuário]{CLR_RESET}\r\n"))
+                            # Dispara chat.abort para o Gateway OpenClaw
+                            abort_payload = {"sessionKey": session_key}
+                            if target_run_id:
+                                abort_payload["runId"] = target_run_id
+                            abort_req = {
+                                "type": "req",
+                                "id": str(uuid.uuid4()),
+                                "method": "chat.abort",
+                                "params": abort_payload
+                            }
+                            try:
+                                ws.send(json.dumps(abort_req))
+                            except Exception:
+                                pass
+                            usage["aborted"] = True
+                            break
+                except Exception:
+                    pass
+
+                # 2. Recebe mensagens do Gateway OpenClaw com timeout curto (100ms)
+                try:
+                    msg_raw = ws.recv(timeout=0.1)
+                except TimeoutError:
+                    continue
+                except Exception:
+                    break
+
                 if not msg_raw:
                     break
                 msg = json.loads(msg_raw)
@@ -652,6 +693,9 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                             err = payload.get("errorMessage") or "Erro na execução da resposta"
                             conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: {err}]{CLR_RESET}\r\n"))
                             break
+
+        if usage.get("aborted"):
+            return usage, []
 
         trailing_directive_text = directive_filter.finish()
         if trailing_directive_text:
@@ -1104,6 +1148,10 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                         spinner.start()
                         
                         usage, downloads = stream_openclaw(prompt, conn, agent, session_id, spinner)
+
+                        if usage.get("aborted"):
+                            conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                            continue
                         
                         # Extração tolerante de tokens
                         details = usage.get("prompt_tokens_details", {}) or {}
@@ -1217,6 +1265,13 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                         else:
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                             current_col = 10
+                    elif char == "\x03":  # Ctrl+C (cancelar buffer e exibir novo prompt)
+                        history_idx = -1
+                        ansi_state = 0
+                        awaiting_model_menu = False
+                        buffer = ""
+                        current_col = 10
+                        conn.sendall(encode_dos(f"^C\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                     elif ord(char) < 32 and char not in ("\r", "\n"):
                         pass  # Ignora outros caracteres de controle
                     else:
