@@ -32,6 +32,72 @@ OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "seu_token_fallback")
 
 # Captura qualquer padrão de escape ANSI (byte ESC real ou notação literal)
 ANSI_CAPTURE = re.compile(r'(\\033|\\x1b|\\e|\x1b)\[[0-9;]*[a-zA-Z]')
+DIRECTIVE_PREFIXES = ("DOWNLOAD:", "MEDIA:", "[[DOWNLOAD:")
+
+class DirectiveFilter:
+    """Filtra diretivas de download em tempo real durante o streaming.
+    Linhas iniciadas por DOWNLOAD:<path> ou MEDIA:<path> são suprimidas da tela
+    e os caminhos são acumulados para disparo automático via Zmodem."""
+    def __init__(self):
+        self.current_line = ""
+        self.at_line_start = True
+        self.downloads = []
+
+    def _check_directive(self, line: str) -> str:
+        stripped = ANSI_CAPTURE.sub('', line).strip()
+        upper = stripped.upper()
+        for p in DIRECTIVE_PREFIXES:
+            if upper.startswith(p):
+                raw = stripped[len(p):].strip()
+                if p == "[[DOWNLOAD:" and raw.endswith("]]"):
+                    raw = raw[:-2].strip()
+                return raw.strip('"\'')
+        return ""
+
+    def feed(self, text: str) -> str:
+        output = []
+        for char in text:
+            if self.at_line_start:
+                self.current_line += char
+                if char == "\n":
+                    dl = self._check_directive(self.current_line)
+                    if dl:
+                        self.downloads.append(dl)
+                    else:
+                        output.append(self.current_line)
+                    self.current_line = ""
+                    self.at_line_start = True
+                    continue
+
+                stripped = ANSI_CAPTURE.sub('', self.current_line).lstrip()
+                if not stripped:
+                    continue
+
+                upper = stripped.upper()
+                matches_prefix = any(p.startswith(upper) or upper.startswith(p) for p in DIRECTIVE_PREFIXES)
+                if not matches_prefix:
+                    self.at_line_start = False
+                    output.append(self.current_line)
+                    self.current_line = ""
+            else:
+                if char == "\n":
+                    output.append("\n")
+                    self.at_line_start = True
+                    self.current_line = ""
+                else:
+                    output.append(char)
+        return "".join(output)
+
+    def finish(self) -> str:
+        output = ""
+        if self.current_line:
+            dl = self._check_directive(self.current_line)
+            if dl:
+                self.downloads.append(dl)
+            else:
+                output = self.current_line
+            self.current_line = ""
+        return output
 
 def sanitize_text(text: str) -> str:
     unsupported_map = {
@@ -103,7 +169,7 @@ class BBSSpinner:
 def generate_session_id() -> str:
     return f"term-{uuid.uuid4().hex[:8]}"
 
-def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str, spinner: BBSSpinner) -> dict:
+def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str, spinner: BBSSpinner):
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENCLAW_TOKEN}"
@@ -119,7 +185,8 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                     "Sempre use acentuação normal em português (á, é, ã, ç, etc.).\n"
                     "Proibido Markdown (** ## |). Para cores use prefixo \\e[ (reset \\e[0m):\n"
                     "Cores: \\e[1;36m=Ciano \\e[1;33m=Amarelo \\e[1;32m=Verde \\e[1;31m=Vermelho \\e[1;35m=Magenta\n"
-                    "Exemplo: \\e[1;35m[AGENTE]\\e[0m \\e[1;36mStatus:\\e[0m \\e[1;32mOK\\e[0m"
+                    "Exemplo: \\e[1;35m[AGENTE]\\e[0m \\e[1;36mStatus:\\e[0m \\e[1;32mOK\\e[0m\n"
+                    "Para enviar arquivos ao usuário via download Zmodem no TeleMate, insira no final em linha própria: DOWNLOAD:<caminho_do_arquivo>"
                 )
             },
             {"role": "user", "content": prompt}
@@ -130,6 +197,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
     
     usage = {}
     spinner_active = True
+    directive_filter = DirectiveFilter()
 
     try:
         response = requests.post(
@@ -145,7 +213,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
             spinner_active = False
             err_msg = f"{CLR_ERROR}[Erro OpenClaw: {response.status_code}]{CLR_RESET}\r\n"
             conn.sendall(encode_dos(err_msg))
-            return usage
+            return usage, directive_filter.downloads
 
         col_count = 0
         MAX_COLS = 76
@@ -173,66 +241,76 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
                         content = delta.get("content", "")
                         
                         if content:
-                            # Apaga o spinner APENAS no exato instante em que o primeiro caractere for renderizado
-                            if spinner_active:
-                                spinner.stop()
-                                spinner_active = False
-                                conn.sendall(encode_dos(CLR_AGENT))
+                            safe_content = directive_filter.feed(sanitize_text(content))
+                            if safe_content:
+                                # Apaga o spinner APENAS no exato instante em que o primeiro caractere for renderizado
+                                if spinner_active:
+                                    spinner.stop()
+                                    spinner_active = False
+                                    conn.sendall(encode_dos(CLR_AGENT))
 
-                            raw_accumulator += sanitize_text(content)
-                            
-                            while True:
-                                match = ANSI_CAPTURE.search(raw_accumulator)
-                                if not match:
-                                    break
+                                raw_accumulator += safe_content
                                 
-                                start, end = match.span()
-                                
-                                text_before = raw_accumulator[:start]
-                                for char in text_before:
-                                    if char == "\n":
-                                        conn.sendall(encode_dos("\r\n"))
-                                        col_count = 0
-                                    else:
-                                        if col_count >= MAX_COLS and char == " ":
+                                while True:
+                                    match = ANSI_CAPTURE.search(raw_accumulator)
+                                    if not match:
+                                        break
+                                    
+                                    start, end = match.span()
+                                    
+                                    text_before = raw_accumulator[:start]
+                                    for char in text_before:
+                                        if char == "\n":
                                             conn.sendall(encode_dos("\r\n"))
                                             col_count = 0
                                         else:
-                                            conn.sendall(encode_dos(char))
-                                            col_count += 1
-                                            
-                                raw_seq = match.group(0)
-                                clean_ansi = re.sub(r'^(\\033|\\x1b|\\e|\x1b)', '\x1b', raw_seq)
-                                conn.sendall(encode_dos(clean_ansi))
-                                
-                                raw_accumulator = raw_accumulator[end:]
+                                            if col_count >= MAX_COLS and char == " ":
+                                                conn.sendall(encode_dos("\r\n"))
+                                                col_count = 0
+                                            else:
+                                                conn.sendall(encode_dos(char))
+                                                col_count += 1
+                                                
+                                    raw_seq = match.group(0)
+                                    clean_ansi = re.sub(r'^(\\033|\\x1b|\\e|\x1b)', '\x1b', raw_seq)
+                                    conn.sendall(encode_dos(clean_ansi))
+                                    
+                                    raw_accumulator = raw_accumulator[end:]
 
-                            if raw_accumulator:
-                                last_esc_pos = max(
-                                    raw_accumulator.rfind("\\"), 
-                                    raw_accumulator.rfind("\x1b")
-                                )
-                                if last_esc_pos == -1:
-                                    safe_text = raw_accumulator
-                                    raw_accumulator = ""
-                                else:
-                                    safe_text = raw_accumulator[:last_esc_pos]
-                                    raw_accumulator = raw_accumulator[last_esc_pos:]
-
-                                for char in safe_text:
-                                    if char == "\n":
-                                        conn.sendall(encode_dos("\r\n"))
-                                        col_count = 0
+                                if raw_accumulator:
+                                    last_esc_pos = max(
+                                        raw_accumulator.rfind("\\"), 
+                                        raw_accumulator.rfind("\x1b")
+                                    )
+                                    if last_esc_pos == -1:
+                                        safe_text = raw_accumulator
+                                        raw_accumulator = ""
                                     else:
-                                        if col_count >= MAX_COLS and char == " ":
+                                        safe_text = raw_accumulator[:last_esc_pos]
+                                        raw_accumulator = raw_accumulator[last_esc_pos:]
+
+                                    for char in safe_text:
+                                        if char == "\n":
                                             conn.sendall(encode_dos("\r\n"))
                                             col_count = 0
                                         else:
-                                            conn.sendall(encode_dos(char))
-                                            col_count += 1
+                                            if col_count >= MAX_COLS and char == " ":
+                                                conn.sendall(encode_dos("\r\n"))
+                                                col_count = 0
+                                            else:
+                                                conn.sendall(encode_dos(char))
+                                                col_count += 1
 
                 except json.JSONDecodeError:
                     continue
+
+        trailing_directive_text = directive_filter.finish()
+        if trailing_directive_text:
+            if spinner_active:
+                spinner.stop()
+                spinner_active = False
+                conn.sendall(encode_dos(CLR_AGENT))
+            raw_accumulator += trailing_directive_text
 
         if spinner_active:
             spinner.stop()
@@ -253,7 +331,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
         err_msg = f"{CLR_ERROR}[Erro no stream: {str(e)}]{CLR_RESET}\r\n"
         conn.sendall(encode_dos(err_msg))
 
-    return usage
+    return usage, directive_filter.downloads
 
 
 def handle_zmodem_download(conn: socket.socket, file_arg: str):
@@ -263,7 +341,7 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
         conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: 'sz' (lrzsz) não encontrado. Instale com: brew install lrzsz]{CLR_RESET}\r\n"))
         return
 
-    filepath = os.path.expanduser(file_arg.strip())
+    filepath = os.path.expanduser(file_arg.strip().strip('"\''))
     if not os.path.isfile(filepath):
         conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: Arquivo não encontrado ou inválido: {filepath}]{CLR_RESET}\r\n"))
         return
@@ -442,7 +520,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                         spinner = BBSSpinner(conn, message="Aguarde")
                         spinner.start()
                         
-                        usage = stream_openclaw(prompt, conn, agent, session_id, spinner)
+                        usage, downloads = stream_openclaw(prompt, conn, agent, session_id, spinner)
                         
                         # Extração tolerante de cache (OpenAI, Anthropic, LiteLLM)
                         details = usage.get("prompt_tokens_details", {}) or {}
@@ -474,6 +552,11 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                             )
 
                         conn.sendall(encode_dos(tok_info))
+
+                        if downloads:
+                            for dl_path in downloads:
+                                handle_zmodem_download(conn, dl_path)
+
                         conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
 
                     elif char == "\x08":
