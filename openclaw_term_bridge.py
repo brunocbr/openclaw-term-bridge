@@ -5,6 +5,7 @@ import re
 import shutil
 import socket
 import subprocess
+import textwrap
 import unicodedata
 import tempfile
 import threading
@@ -120,15 +121,41 @@ def is_text_file(filepath: str) -> bool:
         return False
 
 
-def convert_utf8_to_cp850_crlf(content_bytes: bytes) -> bytes:
-    """Converte conteúdo de texto UTF-8 (Unix LF) para CP850 (DOS CRLF)."""
+def wrap_text_for_dos(text: str, max_cols: int = 76) -> str:
+    """Quebra parágrafos longos em linhas físicas de até max_cols para visualização perfeita no QEdit/DOS."""
+    out_lines = []
+    for line in text.splitlines():
+        if len(line) <= max_cols:
+            out_lines.append(line)
+        else:
+            match = re.match(r"^(\s*(?:[-*+]\s+|\d+[.)]\s+)?)", line)
+            prefix = match.group(1) if match else ""
+            subsequent = " " * len(prefix) if prefix.strip() else prefix
+            wrapped = textwrap.fill(
+                line,
+                width=max_cols,
+                subsequent_indent=subsequent,
+                break_long_words=True,
+                break_on_hyphens=False
+            )
+            out_lines.extend(wrapped.splitlines())
+    return chr(10).join(out_lines)
+
+
+def convert_utf8_to_cp850_crlf(content_bytes: bytes, wrap: bool = False, max_cols: int = 76) -> bytes:
+    """Converte conteúdo de texto UTF-8 (Unix LF) para CP850 (DOS CRLF), aplicando wrap opcional para QEdit."""
     try:
         text = content_bytes.decode("utf-8")
     except UnicodeDecodeError:
         text = content_bytes.decode("latin-1", errors="replace")
 
     sanitized = sanitize_text(text)
-    normalized_crlf = sanitized.replace("\r\n", "\n").replace("\n", "\r\n")
+    if wrap:
+        sanitized = wrap_text_for_dos(sanitized, max_cols=max_cols)
+
+    crlf = chr(13) + chr(10)
+    lf = chr(10)
+    normalized_crlf = sanitized.replace(crlf, lf).replace(lf, crlf)
     return normalized_crlf.encode("cp850", errors="replace")
 
 
@@ -654,14 +681,23 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
     target_send_path = os.path.join(temp_dir, dos_filename)
     is_text = is_text_file(filepath)
 
+    CODE_EXTENSIONS = {
+        ".c", ".cpp", ".h", ".hpp", ".pas", ".bas", ".asm", ".inc",
+        ".py", ".sh", ".bat", ".cmd", ".json", ".xml", ".html", ".htm",
+        ".css", ".js", ".ts", ".sql", ".ini", ".cfg", ".conf", ".yaml", ".yml"
+    }
+    ext = os.path.splitext(filepath)[1].lower()
+    should_wrap = ext not in CODE_EXTENSIONS
+
     if is_text:
         try:
             with open(filepath, "rb") as f:
                 raw_bytes = f.read()
-            converted_bytes = convert_utf8_to_cp850_crlf(raw_bytes)
+            converted_bytes = convert_utf8_to_cp850_crlf(raw_bytes, wrap=should_wrap, max_cols=76)
             with open(target_send_path, "wb") as f:
                 f.write(converted_bytes)
-            conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Conversão ativa: UTF-8 -> CP850 (CRLF) | Nome DOS: {dos_filename}]{CLR_RESET}"))
+            status_wrap = " + Wrap 76 cols" if should_wrap else ""
+            conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Conversão ativa: UTF-8 -> CP850 (CRLF{status_wrap}) | Nome DOS: {dos_filename}]{CLR_RESET}"))
         except Exception:
             shutil.copy2(filepath, target_send_path)
     else:
