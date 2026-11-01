@@ -12,6 +12,8 @@ Ponte (bridge) TCP/Socket para conectar emuladores de terminal retrô (como **Te
   - **Upload (DOS -> Host):** Arquivos texto recebidos do DOS em CP850 são convertidos automaticamente para UTF-8 com finais de linha Unix LF (
 ).
   - **Binários Protegidos:** Arquivos binários (.zip, .exe, .gif, etc.) permanecem intocados em modo binário puro.
+  - **Sanitização Automática para FAT 8.3:** Nomes modernos longos ou com caracteres proibidos no DOS são automaticamente truncados e higienizados para o padrão 8.3 (ex: `1923 O intelectualismo socrático (Mênon, 77b).markdown` -> `1923_O_I.MD`).
+  - **Resolução Unicode NFC/NFD:** Suporte transparente a caminhos acentuados em sistemas de arquivos macOS (APFS) sem corrupção de diretivas.
 - **ZMODEM Integrado:** Disparo automático de download (`DOWNLOAD:<path>`) e comandos in-band `/sz <arquivo>` e `/rz [pasta]`.
 - **Codificação CP850:** Suporte nativo à acentuação do português no padrão DOS (Code Page 850), com sanitização automática de caracteres Unicode incompatíveis.
 - **Cores ANSI:** Compatível com `ANSI.SYS`, convertendo sequências de escape literais (`\033`, `\x1b`, `\e`) em bytes de escape reais para renderização colorida no terminal.
