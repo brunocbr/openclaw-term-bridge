@@ -860,6 +860,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
             session_id = fixed_session_id or generate_session_id()
             session_tokens = 0
             current_model = get_session_model(session_id, agent)
+            awaiting_model_menu = False
 
             banner = (
                 f"\r\n{CLR_HEADER}========================================\r\n"
@@ -886,6 +887,26 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                         if not prompt:
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                             continue
+
+                        if awaiting_model_menu and prompt in [k for k, _, _, _ in POPULAR_MODELS]:
+                            target_model = prompt
+                            for key, name, full_id, _ in POPULAR_MODELS:
+                                if prompt == key:
+                                    target_model = full_id
+                                    break
+                            conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Alterando modelo para: {target_model}...]{CLR_RESET}"))
+                            ok, res = patch_session_model(session_id, target_model, agent)
+                            if ok:
+                                current_model = res
+                                msg = f"\r\n{CLR_AGENT}[Modelo alterado com sucesso: {CLR_HEADER}{current_model}{CLR_AGENT}]{CLR_RESET}\r\n"
+                            else:
+                                msg = f"\r\n{CLR_ERROR}[Erro ao alterar modelo: {res}]{CLR_RESET}\r\n"
+                            conn.sendall(encode_dos(msg))
+                            awaiting_model_menu = False
+                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                            continue
+
+                        awaiting_model_menu = False
 
                         if prompt.startswith("/"):
                             parts = prompt.split(maxsplit=1)
@@ -926,6 +947,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                 else:
                                     menu_text = render_model_menu(current_model)
                                     conn.sendall(encode_dos(menu_text))
+                                    awaiting_model_menu = True
                                 conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                                 continue
 
