@@ -1037,11 +1037,13 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                         if len(buffer) > 0:
                             buffer = buffer[:-1]
                             conn.sendall(b"\x08 \x08")
-                    elif char == "\x15":  # Ctrl+U (limpar linha)
+                    elif char == "\x15":  # Ctrl+U (limpar linha e reexibir prompt)
                         if len(buffer) > 0:
                             back_str = "\x08 \x08" * len(buffer)
                             conn.sendall(encode_dos(back_str))
                             buffer = ""
+                        else:
+                            conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                     elif ord(char) < 32 and char not in ("\r", "\n"):
                         pass  # Ignora outros caracteres de controle
                     else:
