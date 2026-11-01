@@ -858,6 +858,9 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
             print(f"[+] Nova conexão estabelecida via {addr}")
            
             session_id = fixed_session_id or generate_session_id()
+            command_history = []
+            history_idx = -1
+            ansi_state = 0
             session_tokens = 0
             current_model = get_session_model(session_id, agent)
             awaiting_model_menu = False
@@ -893,6 +896,12 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                             conn.sendall(encode_dos("\r\n..> "))
                             continue
                         prompt = buffer.strip()
+                        if prompt and not prompt.startswith("/"):
+                            if not command_history or command_history[-1] != prompt:
+                                command_history.append(prompt)
+                                if len(command_history) > 50:
+                                    command_history.pop(0)
+                        history_idx = -1
                         buffer = ""
                         if not prompt:
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
@@ -913,7 +922,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                 msg = f"\r\n{CLR_ERROR}[Erro ao alterar modelo: {res}]{CLR_RESET}\r\n"
                             conn.sendall(encode_dos(msg))
                             awaiting_model_menu = False
-                            conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                            conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                             continue
 
                         awaiting_model_menu = False
@@ -958,7 +967,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                                     menu_text = render_model_menu(current_model)
                                     conn.sendall(encode_dos(menu_text))
                                     awaiting_model_menu = True
-                                conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                                conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                                 continue
 
                             if cmd in ("/download", "/sz"):
@@ -1035,13 +1044,50 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None):
                             for dl_path in downloads:
                                 handle_zmodem_download(conn, dl_path)
 
-                        conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                        conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                        continue
+
+                    if ansi_state == 0 and char == "\x1b":
+                        ansi_state = 1
+                        continue
+                    elif ansi_state == 1:
+                        if char == "[":
+                            ansi_state = 2
+                            continue
+                        else:
+                            ansi_state = 0
+                    elif ansi_state == 2:
+                        ansi_state = 0
+                        if char == "A":
+                            if command_history:
+                                if history_idx == -1:
+                                    history_idx = len(command_history) - 1
+                                elif history_idx > 0:
+                                    history_idx -= 1
+                                if len(buffer) > 0:
+                                    conn.sendall(encode_dos("\x08 \x08" * len(buffer)))
+                                buffer = command_history[history_idx]
+                                conn.sendall(encode_dos(f"{CLR_USER}{buffer}"))
+                            continue
+                        elif char == "B":
+                            if command_history and history_idx != -1:
+                                if len(buffer) > 0:
+                                    conn.sendall(encode_dos("\x08 \x08" * len(buffer)))
+                                if history_idx < len(command_history) - 1:
+                                    history_idx += 1
+                                    buffer = command_history[history_idx]
+                                    conn.sendall(encode_dos(f"{CLR_USER}{buffer}"))
+                                else:
+                                    history_idx = -1
+                                    buffer = ""
+                            continue
 
                     elif char in ("\x08", "\x7f"):
                         if len(buffer) > 0:
                             buffer = buffer[:-1]
                             conn.sendall(b"\x08 \x08")
                     elif char == "\x15":  # Ctrl+U (limpar linha e reexibir prompt)
+                        history_idx = -1
                         if len(buffer) > 0:
                             back_str = "\x08 \x08" * len(buffer)
                             conn.sendall(encode_dos(back_str))
