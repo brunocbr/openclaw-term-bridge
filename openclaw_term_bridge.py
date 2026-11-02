@@ -1103,6 +1103,11 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_li
             page_lines = default_lines
             pager = BBSPager(conn, page_lines=page_lines)
 
+            # Pausa de estabilizacao pos-conexao (carrier settle time):
+            # Da tempo para o modem virtual do DOSBox emitir o resultado CONNECT
+            # e para o discador do TeleMate fechar sua janela e voltar ao terminal.
+            time.sleep(1.5)
+
             banner = (
                 f"\r\n{CLR_HEADER}"
                 f"       ___                   _____ _\r\n"
