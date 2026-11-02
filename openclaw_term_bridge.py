@@ -16,7 +16,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from websockets.sync.client import connect as ws_connect
 
-# Códigos de Cor ANSI padrão (TeleMate / MS-DOS ANSI.SYS)
+# Códigos de Cor ANSI padrão (Terminal DOS / MS-DOS ANSI.SYS)
 CLR_RESET   = "\x1b[0m"
 CLR_HEADER  = "\x1b[1;36m"
 CLR_STATUS  = "\x1b[1;33m"
@@ -204,19 +204,35 @@ def format_tool_status(name: str, title: str = None) -> str:
     return f"{label}: {t}"
 
 
+BOX_START_CHARS = set("┌┐└┘│─┼├┤┬┴╔╗╚╝║═╠╣╦╩╬░▒▓█+|")
+
 class ANSIWordWrapper:
     """
-    Word-wrapper avancado para streaming com ANSI.
-    Ignora sequencias de escape na largura da tela e quebra
-    linhas suavemente nos espacos antes de estourar max_cols.
+    Word-wrapper avançado para streaming com ANSI.
+    Ignora sequências de escape na largura da tela e quebra
+    linhas suavemente nos espaços antes de estourar max_cols.
+    Detecta automaticamente linhas de tabelas/quadros/regras horizontais
+    (iniciadas por delimitadores como +, |, ┌, etc.) e realiza bypass da quebra.
     """
-    def __init__(self, max_cols: int = 72):
+    def __init__(self, max_cols: int = 76):
         self.max_cols = max_cols
         self.col = 0
         self.word_chars = []
         self.word_vis_len = 0
         self.in_ansi = False
         self.ansi_buf = ""
+        self.is_box_line = False
+        self.line_prefix_chars = ""
+
+    def _check_box_prefix(self, s: str) -> bool:
+        stripped = s.lstrip()
+        if not stripped:
+            return False
+        if stripped[0] in BOX_START_CHARS:
+            return True
+        if len(stripped) >= 3 and (stripped[:3] in ("---", "===", "***")):
+            return True
+        return False
 
     def feed(self, text: str) -> str:
         out = []
@@ -230,11 +246,7 @@ class ANSIWordWrapper:
                     self.ansi_buf = ""
                 continue
 
-            if char == "\\":
-                self.in_ansi = True
-                self.ansi_buf = char
-                continue
-            elif char == "\x1b":
+            if char in ("\\", "\x1b"):
                 self.in_ansi = True
                 self.ansi_buf = char
                 continue
@@ -249,8 +261,45 @@ class ANSIWordWrapper:
                     self.word_vis_len = 0
                 out.append("\r\n")
                 self.col = 0
+                self.is_box_line = False
+                self.line_prefix_chars = ""
                 continue
 
+            # Se o word-wrap estiver desativado (max_cols <= 0), repassa direto
+            if self.max_cols <= 0:
+                if self.word_chars:
+                    out.append("".join(self.word_chars))
+                    self.word_chars = []
+                    self.word_vis_len = 0
+                out.append(char)
+                continue
+
+            # Verificação de início de linha para bypass de molduras / tabelas / arte
+            if not self.is_box_line and len(self.line_prefix_chars) < 5:
+                self.line_prefix_chars += char
+                if self._check_box_prefix(self.line_prefix_chars):
+                    self.is_box_line = True
+
+            # Se for linha de quadro ou tabela, preserva sem quebras forçadas
+            if self.is_box_line:
+                if char in (" ", "\t"):
+                    if self.word_chars:
+                        out.append("".join(self.word_chars))
+                        self.word_chars = []
+                        self.word_vis_len = 0
+                    out.append(char)
+                    self.col += 1
+                else:
+                    self.word_chars.append(char)
+                    self.word_vis_len += 1
+                    if self.word_vis_len > 20:
+                        out.append("".join(self.word_chars))
+                        self.col += self.word_vis_len
+                        self.word_chars = []
+                        self.word_vis_len = 0
+                continue
+
+            # Fluxo normal de texto com word-wrap suave
             if char in (" ", "\t"):
                 if self.col + self.word_vis_len > self.max_cols and self.col > 0:
                     out.append("\r\n")
@@ -280,7 +329,7 @@ class ANSIWordWrapper:
             self.in_ansi = False
             self.ansi_buf = ""
         if self.word_chars:
-            if self.col + self.word_vis_len > self.max_cols and self.col > 0:
+            if not self.is_box_line and self.max_cols > 0 and self.col + self.word_vis_len > self.max_cols and self.col > 0:
                 out.append("\r\n")
             out.append("".join(self.word_chars))
             self.word_chars = []
@@ -544,29 +593,30 @@ def generate_session_id() -> str:
     return f"term-{uuid.uuid4().hex[:8]}"
 
 
-def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str, spinner: BBSSpinner, pager: BBSPager = None):
+def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: str, spinner: BBSSpinner, pager: BBSPager = None, wrap_cols: int = 76):
     """Executa prompt via WebSocket nativo do Gateway OpenClaw com eventos e streaming."""
     usage = {}
     spinner_active = True
     if pager is None:
         pager = BBSPager(conn, page_lines=0)
     directive_filter = DirectiveFilter()
-    word_wrapper = ANSIWordWrapper(max_cols=72)
+    word_wrapper = ANSIWordWrapper(max_cols=wrap_cols)
 
     # Normaliza identificador do agente e chave de sessão
     agent_id = agent.split("/", 1)[1] if "/" in agent else agent
     session_key = f"agent:{agent_id}:openai-user:{session_id}"
 
-    # Contexto de formato para TeleMate injetado no prompt
+    # Contexto de formato universal para Terminal DOS injetado no prompt
     env_context = (
-        "[Contexto: Terminal DOS TeleMate em ANSI, CP850.\n"
+        "[Contexto: Terminal DOS em ANSI, CP850.\n"
         "Sempre use acentuação normal em português (á, é, ã, ç, etc.).\n"
         "Proibido emojis ou caracteres Unicode modernos: use estritamente ASCII e acentuação da CP850 do MS-DOS. Para ícones ou símbolos visuais, use apenas arte ASCII simples.\n"
         "Proibido Markdown (** ## |). Use listas simples com hífen (-). Não insira quebras manuais de linha no meio de frases: escreva parágrafos contínuos e fluidos (o terminal faz o word-wrap automaticamente).\n"
+        "Para quadros e tabelas, use bordas com largura máxima de 76 colunas para caber na tela sem quebras artificiais.\n"
         "Para cores use prefixo \\e[ (reset \\e[0m):\n"
         "Cores: \\e[1;36m=Ciano \\e[1;33m=Amarelo \\e[1;32m=Verde \\e[1;31m=Vermelho \\e[1;35m=Magenta\n"
         "Exemplo: \\e[1;35m[AGENTE]\\e[0m \\e[1;36mStatus:\\e[0m \\e[1;32mOK\\e[0m\n"
-        "Para enviar arquivos via download Zmodem no TeleMate, insira no final em linha própria: DOWNLOAD:<caminho_absoluto>. Para múltiplos arquivos, insira uma linha DOWNLOAD separada para cada arquivo. O bridge gerencia automaticamente a conversão para CP850, formatação DOS 8.3 e o protocolo Zmodem sem necessidade de etapas manuais ou de inspeção do bridge.]\n\n"
+        "Para enviar arquivos via download Zmodem no terminal DOS, insira no final em linha própria: DOWNLOAD:<caminho_absoluto>. Para múltiplos arquivos, insira uma linha DOWNLOAD separada para cada arquivo. O bridge gerencia automaticamente a conversão para CP850, formatação DOS 8.3 e o protocolo Zmodem sem necessidade de etapas manuais ou de inspeção do bridge.]\n\n"
     )
     full_message = env_context + prompt
 
@@ -628,7 +678,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
             aborted_by_user = False
 
             while True:
-                # 1. Verifica se o usuário pressionou CTRL+C (0x03) no TeleMate
+                # 1. Verifica se o usuário pressionou CTRL+C (0x03) no terminal
                 try:
                     r_list, _, _ = select.select([conn], [], [], 0)
                     if r_list:
@@ -821,7 +871,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
 
 
 def handle_zmodem_download(conn: socket.socket, file_arg: str):
-    """Envia um arquivo para o TeleMate via ZMODEM (sz) com conversão automática UTF-8 -> CP850 (CRLF)."""
+    """Envia um arquivo para o terminal via ZMODEM (sz) com conversão automática UTF-8 -> CP850 (CRLF)."""
     sz_bin = shutil.which("sz")
     if not sz_bin:
         conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: 'sz' (lrzsz) não encontrado. Instale com: brew install lrzsz]{CLR_RESET}\r\n"))
@@ -839,7 +889,7 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
             return
 
     dos_filename = to_dos_83_filename(os.path.basename(filepath))
-    temp_dir = tempfile.mkdtemp(prefix="telemate_dl_")
+    temp_dir = tempfile.mkdtemp(prefix="dos_term_dl_")
     target_send_path = os.path.join(temp_dir, dos_filename)
     is_text = is_text_file(filepath)
 
@@ -904,7 +954,7 @@ def handle_zmodem_download(conn: socket.socket, file_arg: str):
 
 
 def handle_zmodem_upload(conn: socket.socket, target_dir_arg: str = ""):
-    """Recebe um arquivo vindo do TeleMate via ZMODEM (rz) com conversão automática CP850 (DOS CRLF) -> UTF-8 (Unix LF)."""
+    """Recebe um arquivo vindo do terminal via ZMODEM (rz) com conversão automática CP850 (DOS CRLF) -> UTF-8 (Unix LF)."""
     rz_bin = shutil.which("rz")
     if not rz_bin:
         conn.sendall(encode_dos(f"\r\n{CLR_ERROR}[Erro: 'rz' (lrzsz) não encontrado. Instale com: brew install lrzsz]{CLR_RESET}\r\n"))
@@ -929,7 +979,7 @@ def handle_zmodem_upload(conn: socket.socket, target_dir_arg: str = ""):
         pass
 
     conn.sendall(encode_dos(f"\r\n{CLR_STATUS}[Aguardando ZMODEM Upload em: {dest_dir}...]{CLR_RESET}\r\n"))
-    conn.sendall(encode_dos(f"{CLR_STATUS}[Dica: Pressione PgUp no TeleMate se o envio não iniciar sozinho]{CLR_RESET}\r\n"))
+    conn.sendall(encode_dos(f"{CLR_STATUS}[Dica: Pressione PgUp ou o atalho de upload no terminal se o envio não iniciar sozinho]{CLR_RESET}\r\n"))
     time.sleep(0.3)
 
     conn.setblocking(False)
@@ -1073,7 +1123,7 @@ def render_model_menu(current_model: str) -> str:
     return "\r\n".join(lines)
 
 
-def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_lines: int = 48, default_spinner: bool = True):
+def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_lines: int = 49, default_spinner: bool = True, default_wrap: int = 76):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, port))
@@ -1101,11 +1151,12 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_li
             current_col = 10
             spinner_enabled = default_spinner
             page_lines = default_lines
+            wrap_cols = default_wrap
             pager = BBSPager(conn, page_lines=page_lines)
 
             # Pausa de estabilizacao pos-conexao (carrier settle time):
             # Da tempo para o modem virtual do DOSBox emitir o resultado CONNECT
-            # e para o discador do TeleMate fechar sua janela e voltar ao terminal.
+            # e para o discador do terminal fechar sua janela e voltar ao terminal.
             time.sleep(1.5)
 
             banner = (
@@ -1118,7 +1169,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_li
                 f"           |_| {CLR_PROMPT}PORT: {port}{CLR_HEADER}    {CLR_AGENT}AGENTE: {agent}{CLR_RESET}\r\n"
                 f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}\r\n"
                 f"{CLR_STATUS}    [Sessão: {CLR_HEADER}{session_id}{CLR_STATUS} | Modelo: {CLR_HEADER}{current_model}{CLR_STATUS}]{CLR_RESET}\r\n"
-                f"{CLR_STATUS}    [Comandos: /help | /model | /session | /new | /lines {CLR_HEADER}{page_lines}{CLR_STATUS}]{CLR_RESET}\r\n"
+                f"{CLR_STATUS}    [Comandos: /help | /model | /lines {CLR_HEADER}{page_lines}{CLR_STATUS} | /wrap {CLR_HEADER}{wrap_cols}{CLR_STATUS}]{CLR_RESET}\r\n"
                 f"{CLR_HEADER}+--------------------------------------------------------------+{CLR_RESET}\r\n\r\n"
                 f"{CLR_PROMPT}OpenClaw>{CLR_USER} "
             )
@@ -1234,7 +1285,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_li
                                     arg = parts[1].strip().lower()
                                     if arg in ("off", "0", "nao", "não", "desativar", "false"):
                                         spinner_enabled = False
-                                        msg = f"\r\n{CLR_STATUS}[Spinner desativado (preservando log back do TeleMate)]{CLR_RESET}\r\n"
+                                        msg = f"\r\n{CLR_STATUS}[Spinner desativado (preservando buffer de tela do terminal)]{CLR_RESET}\r\n"
                                     elif arg in ("on", "1", "sim", "ativar", "true"):
                                         spinner_enabled = True
                                         msg = f"\r\n{CLR_STATUS}[Spinner ativado]{CLR_RESET}\r\n"
@@ -1244,6 +1295,32 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_li
                                     spinner_enabled = not spinner_enabled
                                     st = "ativado" if spinner_enabled else "desativado"
                                     msg = f"\r\n{CLR_STATUS}[Spinner {st}]{CLR_RESET}\r\n"
+                                conn.sendall(encode_dos(msg))
+                                conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
+                                continue
+
+                            if cmd in ("/wrap", "/wordwrap", "/cols"):
+                                if len(parts) > 1:
+                                    arg = parts[1].strip().lower()
+                                    if arg in ("off", "0", "nao", "não", "desativar", "false"):
+                                        wrap_cols = 0
+                                        msg = f"\r\n{CLR_STATUS}[Word-wrap desativado (transmissão contínua)]{CLR_RESET}\r\n"
+                                    elif arg in ("on", "padrao", "padrão"):
+                                        wrap_cols = 76
+                                        msg = f"\r\n{CLR_STATUS}[Word-wrap configurado para o padrão (76 colunas)]{CLR_RESET}\r\n"
+                                    else:
+                                        try:
+                                            nw = int(arg)
+                                            if nw < 20 and nw != 0:
+                                                msg = f"\r\n{CLR_ERROR}Número mínimo de colunas para word-wrap é 20{CLR_RESET}\r\n"
+                                            else:
+                                                wrap_cols = nw
+                                                msg = f"\r\n{CLR_STATUS}[Word-wrap configurado para {wrap_cols} colunas (com bypass de quadros)]{CLR_RESET}\r\n"
+                                        except ValueError:
+                                            msg = f"\r\n{CLR_ERROR}Uso: /wrap <colunas|off> (ex: /wrap 76, /wrap 78 ou /wrap off){CLR_RESET}\r\n"
+                                else:
+                                    st = f"{wrap_cols} colunas (com bypass de quadros)" if wrap_cols > 0 else "desativado"
+                                    msg = f"\r\n{CLR_STATUS}[Word-wrap atual: {st} (use /wrap <n|off> para alterar)]{CLR_RESET}\r\n"
                                 conn.sendall(encode_dos(msg))
                                 conn.sendall(encode_dos(f"{CLR_PROMPT}OpenClaw>{CLR_USER} "))
                                 continue
@@ -1280,10 +1357,11 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_li
                                     f"{CLR_STATUS}/session <id>{CLR_RESET}     - Conecta a uma sessão existente\r\n"
                                     f"{CLR_STATUS}/reset{CLR_RESET}            - Reinicia a sessão atual\r\n"
                                     f"{CLR_STATUS}/model [num|nome]{CLR_RESET} - Menu BBS de seleção ou troca de modelo\r\n"
-                                    f"{CLR_STATUS}/lines [n]{CLR_RESET}        - Linhas por tela para paginação (default: 48, 0=off)\r\n"
+                                    f"{CLR_STATUS}/lines [n]{CLR_RESET}        - Linhas por tela para paginação (default: 49, 0=off)\r\n"
+                                    f"{CLR_STATUS}/wrap [n|off]{CLR_RESET}      - Quebra de palavras (default: 76, bypass em quadros)\r\n"
                                     f"{CLR_STATUS}/spinner [on|off]{CLR_RESET}  - Ativa/desativa animação giratória (mantém status na mesma linha)\r\n"
-                                    f"{CLR_STATUS}/sz <arquivo>{CLR_RESET}     - Download via Zmodem para o TeleMate\r\n"
-                                    f"{CLR_STATUS}/rz [pasta]{CLR_RESET}       - Upload via Zmodem do TeleMate para o host\r\n"
+                                    f"{CLR_STATUS}/sz <arquivo>{CLR_RESET}     - Download via Zmodem para o terminal DOS\r\n"
+                                    f"{CLR_STATUS}/rz [pasta]{CLR_RESET}       - Upload via Zmodem do terminal DOS para o host\r\n"
                                     f"{CLR_STATUS}/help, /?{CLR_RESET}         - Exibe esta ajuda\r\n"
                                 )
                                 conn.sendall(encode_dos(help_msg))
@@ -1296,7 +1374,7 @@ def start_bridge(port: int, agent: str, fixed_session_id: str = None, default_li
                         pager.reset()
                         pager.page_lines = page_lines
                         
-                        usage, downloads = stream_openclaw(prompt, conn, agent, session_id, spinner, pager=pager)
+                        usage, downloads = stream_openclaw(prompt, conn, agent, session_id, spinner, pager=pager, wrap_cols=wrap_cols)
 
                         if usage.get("aborted"):
                             conn.sendall(encode_dos(f"\r\n{CLR_PROMPT}OpenClaw>{CLR_USER} "))
@@ -1469,17 +1547,18 @@ if __name__ == "__main__":
     env_agent = os.getenv("AGENT", DEFAULT_AGENT)
     env_session = os.getenv("SESSION_ID", None)
 
-    parser = argparse.ArgumentParser(description="Bridge OpenClaw para TeleMate Terminal (CP850 / WebSocket)")
+    parser = argparse.ArgumentParser(description="Bridge OpenClaw para Terminal DOS / BBS (CP850 / WebSocket)")
     parser.add_argument("-p", "--port", type=int, default=env_port, help=f"Porta do servidor socket (padrão: {env_port})")
     parser.add_argument("-a", "--agent", type=str, default=env_agent, help=f"Modelo do agente OpenClaw (padrão: {env_agent})")
     parser.add_argument("-s", "--session", type=str, default=env_session, help="ID de sessão fixo para retomar conversas anteriores")
-    parser.add_argument("--lines", type=int, default=48, help="Número de linhas por tela para paginação (padrão: 48, 0 para desativar)")
+    parser.add_argument("--lines", type=int, default=49, help="Número de linhas por tela para paginação (padrão: 49, 0 para desativar)")
+    parser.add_argument("--wrap", type=int, default=76, help="Largura máxima para quebra de palavras (padrão: 76, 0 para desativar)")
     parser.add_argument("--no-spinner", action="store_true", help="Desativa o spinner por padrão")
 
     args = parser.parse_args()
 
     try:
-        start_bridge(port=args.port, agent=args.agent, fixed_session_id=args.session, default_lines=args.lines, default_spinner=not args.no_spinner)
+        start_bridge(port=args.port, agent=args.agent, fixed_session_id=args.session, default_lines=args.lines, default_spinner=not args.no_spinner, default_wrap=args.wrap)
     except KeyboardInterrupt:
         print("\n[*] Bridge encerrada.")
     except Exception as e:
