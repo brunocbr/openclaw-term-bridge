@@ -478,10 +478,54 @@ class DirectiveFilter:
             self.current_line = ""
         return output
 
+def transliterate_greek_text(text: str) -> str:
+    greek_to_latin = {
+        'α': 'a', 'β': 'b', 'γ': 'g', 'δ': 'd', 'ε': 'e', 'ζ': 'z', 'η': 'ê', 'θ': 'th',
+        'ι': 'i', 'κ': 'k', 'λ': 'l', 'μ': 'm', 'ν': 'n', 'ξ': 'x', 'ο': 'o', 'π': 'p',
+        'ρ': 'r', 'σ': 's', 'ς': 's', 'τ': 't', 'υ': 'u', 'φ': 'ph', 'χ': 'ch', 'ψ': 'ps', 'ω': 'ô',
+        'Α': 'A', 'Β': 'B', 'Γ': 'G', 'Δ': 'D', 'Ε': 'E', 'Ζ': 'Z', 'Η': 'Ê', 'Θ': 'Th',
+        'Ι': 'I', 'Κ': 'K', 'Λ': 'L', 'Μ': 'M', 'Ν': 'N', 'Ξ': 'X', 'Ο': 'O', 'Π': 'P',
+        'Ρ': 'R', 'Σ': 'S', 'Τ': 'T', 'Υ': 'U', 'Φ': 'Ph', 'Χ': 'Ch', 'Ψ': 'Ps', 'Ω': 'Ô'
+    }
+
+    # 1. Desmembra todo o texto (grego e latino) separando os acentos
+    text_nfd = unicodedata.normalize('NFD', text)
+    
+    # 2. Converte o espírito áspero para 'h' (minúsculo ou maiúsculo) antes de iterar
+    text_nfd = re.sub(r'([α-ω])\u0314', r'h\1', text_nfd)
+    text_nfd = re.sub(r'([Α-Ω])\u0314', r'H\1', text_nfd)
+    
+    result = []
+    is_greek_context = False
+    
+    for char in text_nfd:
+        if char in greek_to_latin:
+            # É uma letra grega: converte e liga o alerta de contexto grego
+            result.append(greek_to_latin[char])
+            is_greek_context = True
+            
+        elif unicodedata.combining(char):
+            # É um acento/diacrítico. Só descartamos se a letra anterior for grega.
+            # Se a anterior for latina, nós o mantemos na lista.
+            if not is_greek_context:
+                result.append(char)
+                
+        else:
+            # É pontuação, espaço ou uma letra latina
+            result.append(char)
+            # Se for uma letra (como 'O', 'l', 'a'), desliga o contexto grego
+            if char.isalpha():
+                is_greek_context = False
+
+    # 3. Recombina o texto (NFC) para que os acentos latinos voltem a formar 'ê', 'á', etc.
+    return unicodedata.normalize('NFC', "".join(result))
+
 
 def sanitize_text(text: str) -> str:
     # Normaliza primeiro para NFC para compor acentos (ex: a + acento -> á) antes de checar CP850
     text = unicodedata.normalize("NFC", text)
+    # Translitera caracteres gregos
+    text = transliterate_greek_text(text)
     unsupported_map = {
         '“': '"', '”': '"', '‘': "'", '’': "'", '—': '-', '–': '-', '…': '...', '•': '*',
     }
@@ -616,7 +660,7 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
         "Para cores use prefixo \\e[ (reset \\e[0m):\n"
         "Cores: \\e[1;36m=Ciano \\e[1;33m=Amarelo \\e[1;32m=Verde \\e[1;31m=Vermelho \\e[1;35m=Magenta\n"
         "Exemplo: \\e[1;35m[AGENTE]\\e[0m \\e[1;36mStatus:\\e[0m \\e[1;32mOK\\e[0m\n"
-        "Para enviar arquivos via download Zmodem no terminal DOS, insira no final em linha própria: DOWNLOAD:<caminho_absoluto>. Para múltiplos arquivos, insira uma linha DOWNLOAD separada para cada arquivo. O bridge gerencia automaticamente a conversão para CP850, formatação DOS 8.3 e o protocolo Zmodem sem necessidade de etapas manuais ou de inspeção do bridge.]\n\n"
+        "Para enviar arquivos via download Zmodem no terminal DOS, insira no final em linha própria: DOWNLOAD:<caminho_absoluto>. O arquivo deve ser enviado exatamente como está no disco, sem nenhuma modificação ou conversão prévia, pois a bridge gerencia a CP850 e o Zmodem integralmente. Para múltiplos arquivos, insira uma linha DOWNLOAD separada para cada arquivo. O bridge gerencia automaticamente a conversão para CP850, formatação DOS 8.3 e o protocolo Zmodem sem necessidade de etapas manuais ou de inspeção do bridge.]\n\n"
     )
     full_message = env_context + prompt
 
