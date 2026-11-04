@@ -609,8 +609,8 @@ def stream_openclaw(prompt: str, conn: socket.socket, agent: str, session_id: st
     # Contexto de formato universal para Terminal DOS injetado no prompt
     env_context = (
         "[Contexto: Terminal DOS em ANSI, CP850.\n"
-        "Sempre use acentuação normal em português (á, é, ã, ç, etc.).\n"
-        "Proibido emojis ou caracteres Unicode modernos: use estritamente ASCII e acentuação da CP850 do MS-DOS. Para ícones ou símbolos visuais, use apenas arte ASCII simples.\n"
+        "Escreva em português brasileiro correto e natural, com toda a acentuação gráfica padrão (á, é, í, ó, ú, â, ê, ô, ã, õ, ç, etc.). A acentuação em português é obrigatória: responda em UTF-8 normal pois a bridge converte para CP850 do MS-DOS.\n"
+        "Proibido emojis, ideogramas ou símbolos gráficos modernos. Para ícones ou divisores visuais, use apenas arte de texto simples ou caracteres semigráficos da CP850.\n"
         "Proibido Markdown (** ## |). Use listas simples com hífen (-). Não insira quebras manuais de linha no meio de frases: escreva parágrafos contínuos e fluidos (o terminal faz o word-wrap automaticamente).\n"
         "Para quadros e tabelas, use bordas com largura máxima de 76 colunas para caber na tela sem quebras artificiais.\n"
         "Para cores use prefixo \\e[ (reset \\e[0m):\n"
